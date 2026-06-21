@@ -745,14 +745,26 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 String::new()
             };
 
-            let block = Block::default()
-                .title(Line::from(vec![
+            let is_running = app.running_process.is_some();
+            let title_spans = if is_running {
+                vec![
                     Span::styled(" Terminal ", Style::default().fg(Color::Rgb(0, 210, 220)).bold()),
-                ]))
+                    Span::styled("● RUNNING ", Style::default().fg(Color::Rgb(80, 255, 160)).bold()),
+                ]
+            } else {
+                vec![
+                    Span::styled(" Terminal ", Style::default().fg(Color::Rgb(0, 210, 220)).bold()),
+                ]
+            };
+
+            let block = Block::default()
+                .title(Line::from(title_spans))
                 .title_alignment(Alignment::Center)
                 .title_bottom(Line::from(vec![
                     Span::styled("  Esc", Style::default().fg(Color::Rgb(0, 210, 220)).bold()),
                     Span::styled(":close ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("Ctrl+C", Style::default().fg(Color::Rgb(220, 60, 60)).bold()),
+                    Span::styled(":kill ", Style::default().fg(Color::DarkGray)),
                     Span::styled("Ctrl+↑↓", Style::default().fg(Color::Rgb(0, 210, 220)).bold()),
                     Span::styled(":history ", Style::default().fg(Color::DarkGray)),
                     Span::styled("↑↓/PgUp/Dn/Scroll", Style::default().fg(Color::Rgb(0, 210, 220)).bold()),

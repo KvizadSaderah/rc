@@ -1,6 +1,7 @@
 use std::env;
 use std::fs;
-use std::io::{self, Write};
+use std::io::{self, BufRead, Write};
+use std::sync::mpsc;
 use std::path::{Path, PathBuf};
 
 use crossterm::{
@@ -32,6 +33,7 @@ pub struct App {
     pub tree_nodes: Vec<TreeNode>,
     pub tree_selected: usize,
     pub preview_cache: Option<PreviewCache>,
+    pub running_process: Option<RunningProcess>,
 }
 
 impl App {
@@ -66,6 +68,7 @@ impl App {
             tree_nodes: Vec::new(),
             tree_selected: 0,
             preview_cache: None,
+            running_process: None,
         }
     }
 
@@ -230,7 +233,7 @@ impl App {
     // Returns (output_lines, needs_terminal_clear)
     // needs_terminal_clear is true when a full-screen TUI program was run
     // and ratatui must call terminal.clear() before the next draw.
-    pub fn execute_overlay_command(active_dir: &std::path::Path, cmd: &str) -> (Vec<String>, bool) {
+    pub fn execute_overlay_command(active_dir: &std::path::Path, cmd: &str) -> (Vec<String>, bool, Option<std::process::Child>) {
         let mut lines = Vec::new();
 
         // Guard: prevent launching rc inside rc (recursion)
@@ -244,7 +247,7 @@ impl App {
         if self_names.contains(&first_word_base) {
             lines.push("⚠ Cannot launch rc inside rc (would cause recursion).".to_string());
             lines.push("  Use a separate terminal window instead.".to_string());
-            return (lines, false);
+            return (lines, false, None);
         }
 
         // Detect TUI / full-screen programs that need terminal control.
@@ -289,37 +292,151 @@ impl App {
 
             lines.push(format!("[{} exited — press Esc to return to rc]", first_word_base));
             // needs_clear = true so caller calls terminal.clear()
-            return (lines, true);
+            return (lines, true, None);
         }
 
+        // Spawn the command asynchronously with piped stdout/stderr
         let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-        match std::process::Command::new(shell)
+        match std::process::Command::new(&shell)
             .arg("-c")
             .arg(cmd)
             .current_dir(active_dir)
-            .output() {
-            Ok(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines() {
-                    lines.push(line.to_string());
-                }
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                for line in stderr.lines() {
-                    lines.push(format!("stderr: {}", line));
-                }
-                if !output.status.success() {
-                    if let Some(code) = output.status.code() {
-                        lines.push(format!("[Command exited with status code: {}]", code));
-                    } else {
-                        lines.push("[Command terminated by signal]".to_string());
-                    }
-                }
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn() {
+            Ok(child) => {
+                return (lines, false, Some(child));
             }
             Err(e) => {
                 lines.push(format!("Failed to execute command: {}", e));
             }
         }
-        (lines, false)
+        (lines, false, None)
+    }
+
+    // Wrap a spawned child process into a RunningProcess with threaded readers
+    pub fn start_streaming(child: std::process::Child) -> RunningProcess {
+        let (tx, rx) = mpsc::channel::<String>();
+
+        let mut child = child;
+        let stdout = child.stdout.take();
+        let stderr = child.stderr.take();
+
+        // Reader thread for stdout
+        if let Some(stdout) = stdout {
+            let tx_out = tx.clone();
+            std::thread::spawn(move || {
+                let reader = io::BufReader::new(stdout);
+                for line in reader.lines() {
+                    match line {
+                        Ok(l) => { let _ = tx_out.send(l); }
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+
+        // Reader thread for stderr
+        if let Some(stderr) = stderr {
+            let tx_err = tx;
+            std::thread::spawn(move || {
+                let reader = io::BufReader::new(stderr);
+                for line in reader.lines() {
+                    match line {
+                        Ok(l) => { let _ = tx_err.send(format!("stderr: {}", l)); }
+                        Err(_) => break,
+                    }
+                }
+            });
+        }
+
+        RunningProcess { child, receiver: rx, done: false }
+    }
+
+    // Drain available output from a running process (non-blocking)
+    pub fn drain_process_output(&mut self) {
+        let mut new_lines: Vec<String> = Vec::new();
+        let mut process_done = false;
+
+        if let Some(ref mut proc) = self.running_process {
+            // Drain all available lines (non-blocking)
+            loop {
+                match proc.receiver.try_recv() {
+                    Ok(line) => new_lines.push(line),
+                    Err(mpsc::TryRecvError::Empty) => break,
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        proc.done = true;
+                        break;
+                    }
+                }
+            }
+
+            // Check if child process has exited
+            if !proc.done {
+                match proc.child.try_wait() {
+                    Ok(Some(status)) => {
+                        proc.done = true;
+                        // Drain remaining lines after exit
+                        while let Ok(line) = proc.receiver.try_recv() {
+                            new_lines.push(line);
+                        }
+                        if !status.success() {
+                            if let Some(code) = status.code() {
+                                new_lines.push(format!("[Command exited with status code: {}]", code));
+                            } else {
+                                new_lines.push("[Command terminated by signal]".to_string());
+                            }
+                        }
+                    }
+                    Ok(None) => {} // still running
+                    Err(_) => { proc.done = true; }
+                }
+            }
+
+            if proc.done {
+                process_done = true;
+            }
+        }
+
+        // Apply new lines to TerminalOverlay dialog
+        if !new_lines.is_empty() {
+            if let Dialog::TerminalOverlay { output_lines, scroll_offset, .. } = &mut self.dialog {
+                output_lines.extend(new_lines);
+                // Cap buffer at 10000 lines to prevent memory explosion
+                const MAX_LINES: usize = 10_000;
+                if output_lines.len() > MAX_LINES {
+                    let drain_count = output_lines.len() - MAX_LINES;
+                    output_lines.drain(..drain_count);
+                }
+                // Auto-scroll to bottom
+                let display_height = 20; // approximate
+                if output_lines.len() > display_height {
+                    *scroll_offset = output_lines.len() - display_height;
+                }
+            }
+        }
+
+        if process_done {
+            self.running_process = None;
+        }
+    }
+
+    // Kill a running process
+    pub fn kill_running_process(&mut self) {
+        if let Some(ref mut proc) = self.running_process {
+            let _ = proc.child.kill();
+            let _ = proc.child.wait();
+            // Drain any remaining output
+            while let Ok(line) = proc.receiver.try_recv() {
+                if let Dialog::TerminalOverlay { output_lines, .. } = &mut self.dialog {
+                    output_lines.push(line);
+                }
+            }
+            if let Dialog::TerminalOverlay { output_lines, .. } = &mut self.dialog {
+                output_lines.push("[Process killed]".to_string());
+            }
+        }
+        self.running_process = None;
     }
 
     pub fn handle_enter(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {

@@ -1,6 +1,7 @@
 use std::env;
 use std::io;
 use std::path::PathBuf;
+use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{
@@ -21,8 +22,15 @@ use crate::ui::{ui, centered_rect};
 
 pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> io::Result<()> {
     loop {
+        // Drain output from any running background process
+        app.drain_process_output();
+
         terminal.draw(|f| ui(f, &mut app))?;
 
+        // Use poll so we can drain process output even when no key is pressed
+        if !event::poll(Duration::from_millis(50))? {
+            continue;
+        }
         let event = event::read()?;
 
         // Handle mouse scroll in dialogs
@@ -73,7 +81,9 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
         }
 
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            app.should_quit = true;
+            if !matches!(app.dialog, Dialog::TerminalOverlay { .. }) {
+                app.should_quit = true;
+            }
         }
 
         let active_dir = match app.active_panel {
@@ -345,7 +355,16 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
 
                     match key.code {
                         KeyCode::Esc => {
+                            app.kill_running_process();
                             app.dialog = Dialog::None;
+                        }
+                        KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            // Ctrl+C kills the running process but stays in overlay
+                            if app.running_process.is_some() {
+                                app.kill_running_process();
+                            } else {
+                                app.dialog = Dialog::None;
+                            }
                         }
                         KeyCode::Enter => {
                             let text = input.text.clone();
@@ -404,9 +423,12 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                                         text.clone()
                                     };
 
-                                    let (new_lines, needs_clear) = App::execute_overlay_command(&panel_path, &expanded_cmd);
+                                    let (new_lines, needs_clear, child) = App::execute_overlay_command(&panel_path, &expanded_cmd);
                                     output_lines.extend(new_lines);
                                     need_clear = needs_clear;
+                                    if let Some(child) = child {
+                                        app.running_process = Some(App::start_streaming(child));
+                                    }
                                 }
 
                                 // Auto-scroll to bottom
@@ -799,6 +821,7 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
             }
 
         if app.should_quit {
+            app.kill_running_process();
             break;
         }
     }

@@ -1,6 +1,18 @@
 use std::fs::{self, File};
 use std::io::{self, Read};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+
+// =============================================================================
+// Streaming Process for Terminal Overlay
+// =============================================================================
+
+pub struct RunningProcess {
+    pub child: std::process::Child,
+    pub receiver: mpsc::Receiver<String>,
+    pub done: bool,
+}
+
 use std::time::SystemTime;
 
 #[cfg(unix)]
