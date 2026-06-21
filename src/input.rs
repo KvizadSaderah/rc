@@ -875,6 +875,10 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
             app.init_tree();
             app.active_panel = ActivePanel::Left;
             app.update_right_panel_from_tree();
+        } else {
+            // Sync left panel to the directory the right panel was showing
+            let right_path = app.right_panel.path.clone();
+            let _ = app.left_panel.set_path(right_path);
         }
         app.status_message = format!("Tree View: {}", if app.tree_mode { "ON" } else { "OFF" });
     } else if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
