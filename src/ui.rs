@@ -321,25 +321,31 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             }
         }
         Dialog::ConfirmDelete { item_name, .. } => {
-            let area = centered_rect_min(50, 20, 36, 5, f.area());
+            let trash = app.config.use_trash;
+            let (title, verb, accent) = if trash {
+                (" Move to Trash ", "Move to trash", Color::Rgb(234, 179, 8))
+            } else {
+                (" Confirm Delete ", "Permanently delete", Color::Rgb(239, 68, 68))
+            };
+            let area = centered_rect_min(50, 20, 40, 5, f.area());
             f.render_widget(Clear, area);
             let block = Block::default()
-                .title(" Confirm Delete ")
+                .title(title)
                 .title_alignment(Alignment::Center)
                 .borders(Borders::ALL)
                 .border_type(border_type)
-                .border_style(Style::default().fg(Color::Rgb(239, 68, 68)))
+                .border_style(Style::default().fg(accent))
                 .bg(Color::Rgb(17, 24, 39));
-            
+
             let text = vec![
                 Line::from(""),
                 Line::from(vec![
-                    Span::raw("Are you sure you want to delete '"),
+                    Span::raw(format!("{} '", verb)),
                     Span::styled(item_name, Style::default().fg(Color::Yellow).bold()),
                     Span::raw("'?"),
                 ]).alignment(Alignment::Center),
                 Line::from(""),
-                Line::from("Press [Y] or [Enter] to delete, [N] or [Esc] to cancel.").alignment(Alignment::Center),
+                Line::from("[Y]/[Enter] confirm   ·   [N]/[Esc] cancel").alignment(Alignment::Center),
             ];
             
             let para = Paragraph::new(text).block(block);

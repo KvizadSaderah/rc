@@ -1189,8 +1189,13 @@ impl App {
             vec![(path, PathBuf::new())]
         };
 
-        self.fs_job = Some(fileops::spawn(OpKind::Delete, items));
-        self.status_message = "Deleting…".to_string();
+        let (kind, msg) = if self.config.use_trash {
+            (OpKind::Trash, "Moving to trash…")
+        } else {
+            (OpKind::Delete, "Deleting…")
+        };
+        self.fs_job = Some(fileops::spawn(kind, items));
+        self.status_message = msg.to_string();
     }
 
     pub fn initiate_properties(&mut self) {
