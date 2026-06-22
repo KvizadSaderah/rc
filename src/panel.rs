@@ -9,12 +9,6 @@ use crate::types::{FileItem, read_dir};
 // File Panel Core State
 // =============================================================================
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug)]
-pub enum ActivePanel {
-    Left,
-    Right,
-}
-
 pub struct Panel {
     pub path: PathBuf,
     pub items: Vec<FileItem>,

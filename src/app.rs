@@ -13,17 +13,28 @@ use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::config::*;
 use crate::fileops::{self, JobState, OpKind};
+use crate::layout::{Dir, Node, PanelId};
 use crate::panel::*;
 use crate::types::*;
+
+use ratatui::layout::Rect;
 
 // =============================================================================
 // App Controller State
 // =============================================================================
 
 pub struct App {
-    pub left_panel: Panel,
-    pub right_panel: Panel,
-    pub active_panel: ActivePanel,
+    /// Panel arena. Slots are kept stable (tombstoned, never shifted) so the
+    /// layout tree can reference panels by a stable id.
+    pub panels: Vec<Option<Panel>>,
+    /// Currently focused panel id (always a live leaf in `root`).
+    pub focus: PanelId,
+    /// The "other" panel — copy/move destination and sync/swap partner.
+    pub partner: PanelId,
+    /// Tiling split tree over panel ids.
+    pub root: Node,
+    /// Leaf screen rectangles from the last render, for mouse hit-testing.
+    pub leaf_rects: Vec<(PanelId, Rect)>,
     pub dialog: Dialog,
     pub status_message: String,
     pub should_quit: bool,
@@ -55,10 +66,16 @@ impl App {
                 }
             }
         }
+        let left = Panel::new(current_dir.clone(), config.show_hidden, config.sort_by.clone());
+        let right = Panel::new(current_dir, config.show_hidden, config.sort_by.clone());
+        let mut root = Node::leaf(0);
+        root.split_leaf(0, 1, Dir::Horizontal);
         Self {
-            left_panel: Panel::new(current_dir.clone(), config.show_hidden, config.sort_by.clone()),
-            right_panel: Panel::new(current_dir, config.show_hidden, config.sort_by.clone()),
-            active_panel: ActivePanel::Left,
+            panels: vec![Some(left), Some(right)],
+            focus: 0,
+            partner: 1,
+            root,
+            leaf_rects: Vec::new(),
             dialog: Dialog::None,
             status_message: String::new(),
             should_quit: false,
@@ -124,35 +141,182 @@ impl App {
     }
 
     pub fn apply_config(&mut self) {
-        self.left_panel.show_hidden = self.config.show_hidden;
-        self.left_panel.sort_by = self.config.sort_by.clone();
-
-        self.right_panel.show_hidden = self.config.show_hidden;
-        self.right_panel.sort_by = self.config.sort_by.clone();
+        let (show_hidden, sort_by) = (self.config.show_hidden, self.config.sort_by.clone());
+        for slot in self.panels.iter_mut() {
+            if let Some(p) = slot {
+                p.show_hidden = show_hidden;
+                p.sort_by = sort_by.clone();
+            }
+        }
 
         self.keymap = load_keymap(&self.config);
 
         self.refresh_panels();
     }
 
+    // ---- Panel arena access -------------------------------------------------
+
+    pub fn panel(&self, id: PanelId) -> &Panel {
+        self.panels[id].as_ref().expect("live panel slot")
+    }
+
+    pub fn panel_mut(&mut self, id: PanelId) -> &mut Panel {
+        self.panels[id].as_mut().expect("live panel slot")
+    }
+
     pub fn get_active_panel_mut(&mut self) -> &mut Panel {
-        match self.active_panel {
-            ActivePanel::Left => &mut self.left_panel,
-            ActivePanel::Right => &mut self.right_panel,
-        }
+        let f = self.focus;
+        self.panel_mut(f)
     }
 
     pub fn get_active_panel(&self) -> &Panel {
-        match self.active_panel {
-            ActivePanel::Left => &self.left_panel,
-            ActivePanel::Right => &self.right_panel,
-        }
+        self.panel(self.focus)
     }
 
     pub fn get_inactive_panel(&self) -> &Panel {
-        match self.active_panel {
-            ActivePanel::Left => &self.right_panel,
-            ActivePanel::Right => &self.left_panel,
+        self.panel(self.partner)
+    }
+
+    /// Live leaf panel ids in display order.
+    pub fn leaf_ids(&self) -> Vec<PanelId> {
+        self.root.leaves()
+    }
+
+    /// Directories of every live pane (for the filesystem watcher).
+    pub fn watch_dirs(&self) -> Vec<PathBuf> {
+        self.root
+            .leaves()
+            .iter()
+            .map(|&id| self.panel(id).path.clone())
+            .collect()
+    }
+
+    /// Reset the git-status cache on every pane (forces a re-query on refresh).
+    pub fn reset_git_query_all(&mut self) {
+        for slot in self.panels.iter_mut() {
+            if let Some(p) = slot {
+                p.last_git_query = None;
+            }
+        }
+    }
+
+    /// In tree mode the first leaf is the tree pane; the partner shows contents.
+    pub fn is_tree_pane_focused(&self) -> bool {
+        self.focus == self.root.first_leaf()
+    }
+
+    /// Snapshot used to detect navigation (resets the preview scroll offset).
+    pub fn focus_snapshot(&self) -> (PanelId, PathBuf, usize) {
+        let p = self.get_active_panel();
+        (self.focus, p.path.clone(), p.selected)
+    }
+
+    fn alloc_panel(&mut self, p: Panel) -> PanelId {
+        if let Some(i) = self.panels.iter().position(|s| s.is_none()) {
+            self.panels[i] = Some(p);
+            i
+        } else {
+            self.panels.push(Some(p));
+            self.panels.len() - 1
+        }
+    }
+
+    /// Keep `partner` a valid live leaf distinct from `focus` where possible.
+    fn ensure_partner(&mut self) {
+        let leaves = self.root.leaves();
+        if !leaves.contains(&self.partner) || self.partner == self.focus {
+            self.partner = leaves
+                .iter()
+                .copied()
+                .find(|&l| l != self.focus)
+                .unwrap_or(self.focus);
+        }
+    }
+
+    // ---- Tiling operations --------------------------------------------------
+
+    /// Split the focused pane, opening a new pane on the same directory.
+    pub fn split_focus(&mut self, dir: Dir) {
+        let (path, show_hidden, sort_by) = {
+            let p = self.get_active_panel();
+            (p.path.clone(), p.show_hidden, p.sort_by.clone())
+        };
+        let new_panel = Panel::new(path, show_hidden, sort_by);
+        let id = self.alloc_panel(new_panel);
+        self.root.split_leaf(self.focus, id, dir);
+        self.partner = self.focus;
+        self.focus = id;
+        self.status_message = format!(
+            "Split {} — {} panes",
+            if dir == Dir::Horizontal { "vertically" } else { "horizontally" },
+            self.root.leaves().len()
+        );
+    }
+
+    /// Close the focused pane, unless it is the last one.
+    pub fn close_focus(&mut self) {
+        if self.root.leaves().len() <= 1 {
+            self.status_message = "Cannot close the last pane".to_string();
+            return;
+        }
+        let closing = self.focus;
+        if let Some(new_root) = self.root.clone().close_leaf(closing) {
+            self.root = new_root;
+            self.panels[closing] = None;
+            let leaves = self.root.leaves();
+            self.focus = *leaves.first().unwrap_or(&0);
+            self.ensure_partner();
+            self.status_message = format!("Closed pane — {} left", self.root.leaves().len());
+        }
+    }
+
+    /// Cycle focus to the next pane (Tab). Records the previous as partner.
+    pub fn focus_next(&mut self) {
+        let leaves = self.root.leaves();
+        if leaves.len() <= 1 {
+            return;
+        }
+        let pos = leaves.iter().position(|&l| l == self.focus).unwrap_or(0);
+        let next = leaves[(pos + 1) % leaves.len()];
+        self.partner = self.focus;
+        self.focus = next;
+    }
+
+    /// Focus the first (top-left) pane; used when entering tree mode.
+    pub fn focus_first_pane(&mut self) {
+        let first = self.root.first_leaf();
+        self.focus = first;
+        self.ensure_partner();
+    }
+
+    /// Move the focused pane to the partner pane's current directory.
+    pub fn sync_focus_to_partner(&mut self) {
+        self.ensure_partner();
+        if self.partner == self.focus {
+            return;
+        }
+        let target = self.get_inactive_panel().path.clone();
+        let focus = self.focus;
+        let _ = self.panel_mut(focus).set_path(target);
+    }
+
+    /// Focus a specific pane id (mouse click). Records previous as partner.
+    pub fn focus_panel(&mut self, id: PanelId) {
+        if id != self.focus && self.root.contains(id) {
+            self.partner = self.focus;
+            self.focus = id;
+        }
+    }
+
+    /// Grow or shrink the focused pane along `dir` by adjusting its nearest
+    /// ancestor split of that orientation.
+    pub fn resize_focus(&mut self, grow: bool, dir: Dir) {
+        if let Some((path, in_first)) = self.root.ancestor_split(self.focus, dir) {
+            if let Some(cur) = self.root.get_ratio(&path) {
+                let step = 0.05;
+                let delta = if grow == in_first { step } else { -step };
+                self.root.set_ratio(&path, cur + delta);
+            }
         }
     }
 
@@ -161,38 +325,45 @@ impl App {
             self.init_tree();
             self.update_right_panel_from_tree();
         } else {
-            self.left_panel.refresh();
-            self.right_panel.refresh();
+            for slot in self.panels.iter_mut() {
+                if let Some(p) = slot {
+                    p.refresh();
+                }
+            }
         }
     }
 
+    /// Tab: cycle focus to the next pane.
     pub fn toggle_panel(&mut self) {
-        self.active_panel = match self.active_panel {
-            ActivePanel::Left => ActivePanel::Right,
-            ActivePanel::Right => ActivePanel::Left,
-        };
+        self.focus_next();
     }
 
-    /// Sync inactive panel to the same directory as the active panel.
+    /// Sync the partner pane to the focused pane's directory.
     pub fn sync_panels(&mut self) {
+        self.ensure_partner();
+        if self.partner == self.focus {
+            return;
+        }
         let active_path = self.get_active_panel().path.clone();
-        let inactive = match self.active_panel {
-            ActivePanel::Left => &mut self.right_panel,
-            ActivePanel::Right => &mut self.left_panel,
-        };
-        let _ = inactive.set_path(active_path);
+        let partner = self.partner;
+        let _ = self.panel_mut(partner).set_path(active_path);
     }
 
-    /// Swap left and right panel directories.
+    /// Swap the focused and partner pane directories.
     pub fn swap_panels(&mut self) {
-        let left_path = self.left_panel.path.clone();
-        let right_path = self.right_panel.path.clone();
-        let _ = self.left_panel.set_path(right_path);
-        let _ = self.right_panel.set_path(left_path);
+        self.ensure_partner();
+        if self.partner == self.focus {
+            return;
+        }
+        let a = self.get_active_panel().path.clone();
+        let b = self.get_inactive_panel().path.clone();
+        let (focus, partner) = (self.focus, self.partner);
+        let _ = self.panel_mut(focus).set_path(b);
+        let _ = self.panel_mut(partner).set_path(a);
     }
 
     pub fn init_tree(&mut self) {
-        let root_path = self.left_panel.path.clone();
+        let root_path = self.get_active_panel().path.clone();
         self.tree_nodes.clear();
         self.tree_selected = 0;
 
@@ -291,12 +462,16 @@ impl App {
     }
 
     pub fn update_right_panel_from_tree(&mut self) {
+        // In tree mode the partner pane shows the contents of the selected node.
+        self.ensure_partner();
         if let Some(node) = self.tree_nodes.get(self.tree_selected) {
             let path = node.path.clone();
-            self.right_panel.path = path;
-            self.right_panel.refresh();
-            self.right_panel.selected = 0;
-            self.right_panel.scroll_state.select(Some(0));
+            let partner = self.partner;
+            let p = self.panel_mut(partner);
+            p.path = path;
+            p.refresh();
+            p.selected = 0;
+            p.scroll_state.select(Some(0));
         }
     }
 
@@ -1072,24 +1247,13 @@ pub fn edit_file(path: &Path, editor_bin: &str) -> io::Result<()> {
 pub fn execute_menu_action(app: &mut App, menu_idx: usize, item_idx: usize, _terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
     app.dialog = Dialog::None; // Close menu state
     match menu_idx {
-        0 => { // Left Panel Config
+        0 => { // Focused pane config (menu "Left")
+            let p = app.get_active_panel_mut();
             match item_idx {
-                0 => {
-                    app.left_panel.show_hidden = !app.left_panel.show_hidden;
-                    app.left_panel.refresh();
-                }
-                1 => {
-                    app.left_panel.sort_by = "name".to_string();
-                    app.left_panel.refresh();
-                }
-                2 => {
-                    app.left_panel.sort_by = "size".to_string();
-                    app.left_panel.refresh();
-                }
-                3 => {
-                    app.left_panel.sort_by = "time".to_string();
-                    app.left_panel.refresh();
-                }
+                0 => { p.show_hidden = !p.show_hidden; p.refresh(); }
+                1 => { p.sort_by = "name".to_string(); p.refresh(); }
+                2 => { p.sort_by = "size".to_string(); p.refresh(); }
+                3 => { p.sort_by = "time".to_string(); p.refresh(); }
                 _ => {}
             }
         }
@@ -1155,24 +1319,15 @@ pub fn execute_menu_action(app: &mut App, menu_idx: usize, item_idx: usize, _ter
                 _ => {}
             }
         }
-        4 => { // Right Panel Config
+        4 => { // Partner pane config (menu "Right")
+            app.ensure_partner();
+            let id = app.partner;
+            let p = app.panel_mut(id);
             match item_idx {
-                0 => {
-                    app.right_panel.show_hidden = !app.right_panel.show_hidden;
-                    app.right_panel.refresh();
-                }
-                1 => {
-                    app.right_panel.sort_by = "name".to_string();
-                    app.right_panel.refresh();
-                }
-                2 => {
-                    app.right_panel.sort_by = "size".to_string();
-                    app.right_panel.refresh();
-                }
-                3 => {
-                    app.right_panel.sort_by = "time".to_string();
-                    app.right_panel.refresh();
-                }
+                0 => { p.show_hidden = !p.show_hidden; p.refresh(); }
+                1 => { p.sort_by = "name".to_string(); p.refresh(); }
+                2 => { p.sort_by = "size".to_string(); p.refresh(); }
+                3 => { p.sort_by = "time".to_string(); p.refresh(); }
                 _ => {}
             }
         }
@@ -1191,49 +1346,51 @@ mod tests {
         fs::create_dir_all(root.join("left")).unwrap();
         fs::create_dir_all(root.join("right")).unwrap();
         let mut app = App::new();
-        let _ = app.left_panel.set_path(root.join("left"));
-        let _ = app.right_panel.set_path(root.join("right"));
-        app.active_panel = ActivePanel::Left;
+        // Default workspace = two panes; focus=0, partner=1.
+        let f = app.focus;
+        let _ = app.panel_mut(f).set_path(root.join("left"));
+        let p = app.partner;
+        let _ = app.panel_mut(p).set_path(root.join("right"));
         (root, app)
     }
 
     #[test]
     fn test_toggle_panel() {
         let (root, mut app) = app_in("toggle");
-        assert_eq!(app.active_panel, ActivePanel::Left);
+        let a = app.focus;
         app.toggle_panel();
-        assert_eq!(app.active_panel, ActivePanel::Right);
+        assert_ne!(app.focus, a);
         app.toggle_panel();
-        assert_eq!(app.active_panel, ActivePanel::Left);
+        assert_eq!(app.focus, a);
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn test_sync_panels() {
         let (root, mut app) = app_in("sync");
-        assert_ne!(app.left_panel.path, app.right_panel.path);
-        app.sync_panels(); // active=Left -> right follows left
-        assert_eq!(app.right_panel.path, app.left_panel.path);
+        assert_ne!(app.get_active_panel().path, app.get_inactive_panel().path);
+        app.sync_panels();
+        assert_eq!(app.get_inactive_panel().path, app.get_active_panel().path);
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn test_swap_panels() {
         let (root, mut app) = app_in("swap");
-        let l = app.left_panel.path.clone();
-        let r = app.right_panel.path.clone();
+        let a = app.get_active_panel().path.clone();
+        let b = app.get_inactive_panel().path.clone();
         app.swap_panels();
-        assert_eq!(app.left_panel.path, r);
-        assert_eq!(app.right_panel.path, l);
+        assert_eq!(app.get_active_panel().path, b);
+        assert_eq!(app.get_inactive_panel().path, a);
         let _ = fs::remove_dir_all(&root);
     }
 
     #[test]
     fn test_handle_backspace_goes_to_parent() {
         let (root, mut app) = app_in("back");
-        let child = app.left_panel.path.clone();
+        let child = app.get_active_panel().path.clone();
         app.handle_backspace();
-        assert_eq!(app.left_panel.path, child.parent().unwrap());
+        assert_eq!(app.get_active_panel().path, child.parent().unwrap());
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1241,6 +1398,29 @@ mod tests {
     fn test_fs_not_busy_initially() {
         let (root, app) = app_in("busy");
         assert!(!app.is_fs_busy());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_split_and_close() {
+        let (root, mut app) = app_in("split");
+        assert_eq!(app.leaf_ids().len(), 2);
+        app.split_focus(Dir::Vertical);
+        assert_eq!(app.leaf_ids().len(), 3);
+        // focus is the new pane; partner is the old focus
+        assert!(app.root.contains(app.focus));
+        app.close_focus();
+        assert_eq!(app.leaf_ids().len(), 2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_cannot_close_last_pane() {
+        let (root, mut app) = app_in("last");
+        app.close_focus(); // 2 -> 1
+        assert_eq!(app.leaf_ids().len(), 1);
+        app.close_focus(); // refuse
+        assert_eq!(app.leaf_ids().len(), 1);
         let _ = fs::remove_dir_all(&root);
     }
 }

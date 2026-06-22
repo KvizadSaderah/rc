@@ -12,7 +12,6 @@ use ratatui::{
 
 use crate::app::*;
 use crate::config::*;
-use crate::panel::*;
 use crate::types::*;
 use crate::ui::{ui, centered_rect};
 
@@ -41,7 +40,7 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
 
         // Keep the watcher pointed at the two visible panel directories.
         if let Some(w) = watcher.as_mut() {
-            w.sync_paths(&[app.left_panel.path.clone(), app.right_panel.path.clone()]);
+            w.sync_paths(&app.watch_dirs());
             if w.drain() {
                 dirty = true;
                 dirty_since = std::time::Instant::now();
@@ -132,10 +131,7 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                 app.should_quit = true;
             }
 
-        let active_dir = match app.active_panel {
-            ActivePanel::Left => app.left_panel.path.clone(),
-            ActivePanel::Right => app.right_panel.path.clone(),
-        };
+        let active_dir = app.get_active_panel().path.clone();
 
         // Route key events depending on dialog state
         match &mut app.dialog {
@@ -908,13 +904,7 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
 
 
 fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
-    let prev_state = (
-        app.active_panel,
-        app.left_panel.path.clone(),
-        app.left_panel.selected,
-        app.right_panel.path.clone(),
-        app.right_panel.selected,
-    );
+    let prev_state = app.focus_snapshot();
 
     let keys = &app.keymap;
 
@@ -974,13 +964,13 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
     } else if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.tree_mode = !app.tree_mode;
         if app.tree_mode {
+            app.focus_first_pane();
             app.init_tree();
-            app.active_panel = ActivePanel::Left;
             app.update_right_panel_from_tree();
         } else {
-            // Sync left panel to the directory the right panel was showing
-            let right_path = app.right_panel.path.clone();
-            let _ = app.left_panel.set_path(right_path);
+            // On exit, move the focused (tree) pane to the directory the
+            // partner content pane was showing.
+            app.sync_focus_to_partner();
         }
         app.status_message = format!("Tree View: {}", if app.tree_mode { "ON" } else { "OFF" });
     } else if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -1052,7 +1042,7 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
                 panel.select_next();
             }
     } else if matches_key(&key, &keys.up) {
-        if app.tree_mode && app.active_panel == ActivePanel::Left {
+        if app.tree_mode && app.is_tree_pane_focused() {
             if app.tree_selected > 0 {
                 app.tree_selected -= 1;
                 app.update_right_panel_from_tree();
@@ -1061,7 +1051,7 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
             app.get_active_panel_mut().select_prev();
         }
     } else if matches_key(&key, &keys.down) {
-        if app.tree_mode && app.active_panel == ActivePanel::Left {
+        if app.tree_mode && app.is_tree_pane_focused() {
             if app.tree_selected + 1 < app.tree_nodes.len() {
                 app.tree_selected += 1;
                 app.update_right_panel_from_tree();
@@ -1070,7 +1060,7 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
             app.get_active_panel_mut().select_next();
         }
     } else if matches_key(&key, &keys.left) {
-        if app.tree_mode && app.active_panel == ActivePanel::Left {
+        if app.tree_mode && app.is_tree_pane_focused() {
             let idx = app.tree_selected;
             if idx < app.tree_nodes.len() {
                 if app.tree_nodes[idx].is_expanded {
@@ -1092,7 +1082,7 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
             app.handle_backspace();
         }
     } else if matches_key(&key, &keys.right) {
-        if app.tree_mode && app.active_panel == ActivePanel::Left {
+        if app.tree_mode && app.is_tree_pane_focused() {
             app.toggle_tree_node();
         } else {
             let is_enter = key.code == KeyCode::Enter;
@@ -1104,7 +1094,7 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
         // Fallback controls
         match key.code {
             KeyCode::PageUp => {
-                if app.tree_mode && app.active_panel == ActivePanel::Left {
+                if app.tree_mode && app.is_tree_pane_focused() {
                     app.tree_selected = app.tree_selected.saturating_sub(10);
                     app.update_right_panel_from_tree();
                 } else {
@@ -1112,7 +1102,7 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
                 }
             }
             KeyCode::PageDown => {
-                if app.tree_mode && app.active_panel == ActivePanel::Left {
+                if app.tree_mode && app.is_tree_pane_focused() {
                     if !app.tree_nodes.is_empty() {
                         app.tree_selected = std::cmp::min(app.tree_selected + 10, app.tree_nodes.len() - 1);
                         app.update_right_panel_from_tree();
@@ -1122,7 +1112,7 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
                 }
             }
             KeyCode::Home => {
-                if app.tree_mode && app.active_panel == ActivePanel::Left {
+                if app.tree_mode && app.is_tree_pane_focused() {
                     app.tree_selected = 0;
                     app.update_right_panel_from_tree();
                 } else {
@@ -1130,7 +1120,7 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
                 }
             }
             KeyCode::End => {
-                if app.tree_mode && app.active_panel == ActivePanel::Left {
+                if app.tree_mode && app.is_tree_pane_focused() {
                     if !app.tree_nodes.is_empty() {
                         app.tree_selected = app.tree_nodes.len() - 1;
                         app.update_right_panel_from_tree();
@@ -1150,8 +1140,7 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
                 };
             }
             KeyCode::Char('r') => {
-                app.left_panel.last_git_query = None;
-                app.right_panel.last_git_query = None;
+                app.reset_git_query_all();
                 app.refresh_panels();
                 app.status_message = "Panels reloaded".to_string();
             }
@@ -1168,13 +1157,7 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
         }
     }
 
-    let new_state = (
-        app.active_panel,
-        app.left_panel.path.clone(),
-        app.left_panel.selected,
-        app.right_panel.path.clone(),
-        app.right_panel.selected,
-    );
+    let new_state = app.focus_snapshot();
     if prev_state != new_state {
         app.preview_scroll_offset = 0;
     }

@@ -548,7 +548,7 @@ mod tests {
         assert_eq!(app.preview_scroll_offset, 10);
 
         // simulate path navigation
-        app.left_panel.selected = 1;
+        app.get_active_panel_mut().selected = 1;
         
         // compare states (like at the end of handle_main_keys)
         app.preview_scroll_offset = 0; // reset
@@ -561,8 +561,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("rc_test_touch_{}", chrono::Utc::now().timestamp_micros()));
         fs::create_dir_all(&root).unwrap();
 
-        let _ = app.left_panel.set_path(root.clone());
-        app.active_panel = crate::panel::ActivePanel::Left;
+        let _ = app.get_active_panel_mut().set_path(root.clone());
         
         let new_file_name = "empty_file.txt".to_string();
         app.execute_touch(new_file_name.clone());
@@ -583,12 +582,11 @@ mod tests {
         let file_path = root.join("test_file.txt");
         fs::write(&file_path, "properties content").unwrap();
 
-        let _ = app.left_panel.set_path(root.clone());
-        app.active_panel = crate::panel::ActivePanel::Left;
+        let _ = app.get_active_panel_mut().set_path(root.clone());
         
         // Find test_file.txt in items and select it
-        if let Some(idx) = app.left_panel.items.iter().position(|i| i.name == "test_file.txt") {
-            app.left_panel.selected = idx;
+        if let Some(idx) = app.get_active_panel().items.iter().position(|i| i.name == "test_file.txt") {
+            app.get_active_panel_mut().selected = idx;
         }
 
         app.initiate_properties();
@@ -626,12 +624,11 @@ mod tests {
         let file_path = root.join("test_file.txt");
         fs::write(&file_path, "some content").unwrap();
 
-        let _ = app.left_panel.set_path(root.clone());
-        app.active_panel = crate::panel::ActivePanel::Left;
+        let _ = app.get_active_panel_mut().set_path(root.clone());
 
         // Select the file
-        if let Some(idx) = app.left_panel.items.iter().position(|i| i.name == "test_file.txt") {
-            app.left_panel.selected = idx;
+        if let Some(idx) = app.get_active_panel().items.iter().position(|i| i.name == "test_file.txt") {
+            app.get_active_panel_mut().selected = idx;
         }
 
         let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
