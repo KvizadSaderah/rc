@@ -1030,6 +1030,22 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
             }
             app.status_message = format!("Selected {} items", panel.marked.len());
         }
+    } else if key.code == KeyCode::Char('|') {
+        // Split the focused pane into a left | right pair.
+        app.split_focus(crate::layout::Dir::Horizontal);
+    } else if key.code == KeyCode::Char('-') && key.modifiers.is_empty() {
+        // Split the focused pane into a top / bottom pair.
+        app.split_focus(crate::layout::Dir::Vertical);
+    } else if key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.close_focus();
+    } else if key.code == KeyCode::Right && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.resize_focus(true, crate::layout::Dir::Horizontal);
+    } else if key.code == KeyCode::Left && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.resize_focus(false, crate::layout::Dir::Horizontal);
+    } else if key.code == KeyCode::Down && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.resize_focus(true, crate::layout::Dir::Vertical);
+    } else if key.code == KeyCode::Up && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.resize_focus(false, crate::layout::Dir::Vertical);
     } else if matches_key(&key, &keys.select_item) {
         if let Some(item) = app.get_active_panel().get_selected_item().cloned()
             && item.name != ".." {
