@@ -46,30 +46,41 @@ pub struct TreeNode {
     pub has_subdirs: bool,
 }
 
-pub fn is_executable(path: &Path) -> bool {
+/// Executable check reusing metadata we already have (avoids a second stat
+/// per entry on the hot directory-listing path).
+fn is_executable_meta(meta: &fs::Metadata, path: &Path) -> bool {
     #[cfg(unix)]
     {
-        if let Ok(metadata) = fs::metadata(path) {
-            return metadata.permissions().mode() & 0o111 != 0;
+        let _ = path;
+        meta.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        if let Some(ext) = path.extension() {
+            let ext_str = ext.to_string_lossy().to_lowercase();
+            return ext_str == "exe" || ext_str == "bat" || ext_str == "sh" || ext_str == "cmd";
         }
+        false
     }
-    if let Some(ext) = path.extension() {
-        let ext_str = ext.to_string_lossy().to_lowercase();
-        return ext_str == "exe" || ext_str == "bat" || ext_str == "sh" || ext_str == "cmd";
-    }
-    false
 }
 
+/// Whether `path` has at least one non-hidden subdirectory. Symlinked
+/// directories are deliberately not counted, so the tree view never descends
+/// into a symlink loop.
 pub fn has_subdirectories(path: &Path) -> bool {
     if let Ok(entries) = fs::read_dir(path) {
         for entry in entries.flatten() {
-            if let Ok(meta) = entry.metadata() {
-                if meta.is_dir() {
-                    let name = entry.file_name();
-                    let name_str = name.to_string_lossy();
-                    if name_str != "." && name_str != ".." && !name_str.starts_with('.') {
-                        return true;
-                    }
+            // file_type() does not follow symlinks; skip symlinked entries.
+            let ft = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(_) => continue,
+            };
+            if ft.is_dir() {
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str != "." && name_str != ".." && !name_str.starts_with('.') {
+                    return true;
                 }
             }
         }
@@ -78,6 +89,10 @@ pub fn has_subdirectories(path: &Path) -> bool {
 }
 
 pub fn read_dir(path: &Path) -> io::Result<Vec<FileItem>> {
+    // Open the directory first so permission/IO errors surface to the caller
+    // (e.g. set_path) instead of silently presenting an empty listing.
+    let entries = fs::read_dir(path)?;
+
     let mut items = Vec::new();
 
     // Add parent link ".." if we are not at the root
@@ -93,31 +108,32 @@ pub fn read_dir(path: &Path) -> io::Result<Vec<FileItem>> {
         });
     }
 
-    if let Ok(entries) = fs::read_dir(path) {
-        let mut file_entries = Vec::new();
-        for entry in entries.flatten() {
-            let path = entry.path();
-            let metadata = entry.metadata().ok();
-            let file_type = entry.file_type();
-            
-            let is_dir = metadata.as_ref().map(|m| m.is_dir()).unwrap_or(false);
-            let is_symlink = file_type.as_ref().map(|ft| ft.is_symlink()).unwrap_or(false);
-            let is_exec = !is_dir && is_executable(&path);
-            let size = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
-            let modified = metadata.as_ref().and_then(|m| m.modified().ok());
-            let name = entry.file_name().to_string_lossy().into_owned();
+    for entry in entries.flatten() {
+        let entry_path = entry.path();
+        // symlink_metadata() does not follow links — needed to detect symlinks.
+        let link_meta = entry.metadata().ok(); // follows symlink (for is_dir/size)
+        let file_type = entry.file_type(); // does not follow symlink
 
-            file_entries.push(FileItem {
-                name,
-                path,
-                is_dir,
-                is_symlink,
-                is_exec,
-                size,
-                modified,
-            });
-        }
-        items.extend(file_entries);
+        let is_symlink = file_type.as_ref().map(|ft| ft.is_symlink()).unwrap_or(false);
+        let is_dir = link_meta.as_ref().map(|m| m.is_dir()).unwrap_or(false);
+        let is_exec = !is_dir
+            && link_meta
+                .as_ref()
+                .map(|m| is_executable_meta(m, &entry_path))
+                .unwrap_or(false);
+        let size = link_meta.as_ref().map(|m| m.len()).unwrap_or(0);
+        let modified = link_meta.as_ref().and_then(|m| m.modified().ok());
+        let name = entry.file_name().to_string_lossy().into_owned();
+
+        items.push(FileItem {
+            name,
+            path: entry_path,
+            is_dir,
+            is_symlink,
+            is_exec,
+            size,
+            modified,
+        });
     }
 
     Ok(items)
@@ -481,6 +497,33 @@ mod tests {
         input.backspace();
         assert_eq!(input.text, "xorl");
         assert_eq!(input.cursor_position, 4);
+    }
+
+    #[test]
+    fn test_read_dir_errors_surface() {
+        // Reading a non-existent path must be an Err, not a silent empty list.
+        let missing = std::env::temp_dir().join(format!("rc_nope_{}", chrono::Utc::now().timestamp_micros()));
+        assert!(read_dir(&missing).is_err());
+
+        // Reading a regular file (not a directory) must also be an Err.
+        let file = std::env::temp_dir().join(format!("rc_file_{}.txt", chrono::Utc::now().timestamp_micros()));
+        fs::write(&file, b"x").unwrap();
+        assert!(read_dir(&file).is_err());
+        let _ = fs::remove_file(&file);
+    }
+
+    #[test]
+    fn test_read_dir_lists_children() {
+        let root = std::env::temp_dir().join(format!("rc_rd_{}", chrono::Utc::now().timestamp_micros()));
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("a.txt"), b"hi").unwrap();
+
+        let items = read_dir(&root).unwrap();
+        assert!(items.iter().any(|i| i.name == ".."));
+        assert!(items.iter().any(|i| i.name == "a.txt" && !i.is_dir));
+        assert!(items.iter().any(|i| i.name == "sub" && i.is_dir));
+
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

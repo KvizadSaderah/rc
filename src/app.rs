@@ -212,8 +212,10 @@ impl App {
         if let Ok(entries) = fs::read_dir(&root_path) {
             let mut subdirs = Vec::new();
             for entry in entries.flatten() {
+                // Skip symlinks so the tree can never descend into a loop.
+                let is_symlink = entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(false);
                 if let Ok(meta) = entry.metadata() {
-                    if meta.is_dir() {
+                    if meta.is_dir() && !is_symlink {
                         let name = entry.file_name().to_string_lossy().into_owned();
                         if !name.starts_with('.') {
                             let path = entry.path();
@@ -260,8 +262,9 @@ impl App {
             let mut subdirs = Vec::new();
             if let Ok(entries) = fs::read_dir(&path) {
                 for entry in entries.flatten() {
+                    let is_symlink = entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(false);
                     if let Ok(meta) = entry.metadata() {
-                        if meta.is_dir() {
+                        if meta.is_dir() && !is_symlink {
                             let name = entry.file_name().to_string_lossy().into_owned();
                             if !name.starts_with('.') {
                                 let sub_path = entry.path();

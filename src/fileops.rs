@@ -478,6 +478,33 @@ mod tests {
     }
 
     #[test]
+    fn test_copy_does_not_follow_symlink_loop() {
+        // A directory containing a symlink back to itself must not cause
+        // infinite recursion: the link is recreated, not traversed.
+        let root = tmp("loop");
+        let src = root.join("src");
+        let dst_dir = root.join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst_dir).unwrap();
+        fs::write(src.join("real.txt"), b"data").unwrap();
+        let loop_link = src.join("self");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&src, &loop_link).unwrap();
+        #[cfg(not(unix))]
+        std::os::windows::fs::symlink_dir(&src, &loop_link).unwrap();
+
+        let job = drain(spawn(OpKind::Copy, vec![(src.clone(), dst_dir.join("src"))]));
+
+        let copied = dst_dir.join("src");
+        assert!(copied.join("real.txt").exists());
+        let link_meta = fs::symlink_metadata(copied.join("self")).unwrap();
+        assert!(link_meta.file_type().is_symlink(), "loop link recreated, not followed");
+        assert!(job.errors.is_empty());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn test_delete_symlink_keeps_target() {
         let root = tmp("symdel");
         let target = root.join("target");
