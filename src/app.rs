@@ -177,11 +177,6 @@ impl App {
         self.panel(self.partner)
     }
 
-    /// Live leaf panel ids in display order.
-    pub fn leaf_ids(&self) -> Vec<PanelId> {
-        self.root.leaves()
-    }
-
     /// Directories of every live pane (for the filesystem watcher).
     pub fn watch_dirs(&self) -> Vec<PathBuf> {
         self.root
@@ -305,6 +300,80 @@ impl App {
         if id != self.focus && self.root.contains(id) {
             self.partner = self.focus;
             self.focus = id;
+        }
+    }
+
+    // ---- Mouse helpers ------------------------------------------------------
+
+    /// The pane (and its rect) at a screen cell, using the last render's rects.
+    pub fn pane_at(&self, col: u16, row: u16) -> Option<(PanelId, Rect)> {
+        self.leaf_rects
+            .iter()
+            .find(|(_, r)| {
+                col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
+            })
+            .copied()
+    }
+
+    /// Map a screen row inside a pane's rect to a list item index.
+    fn item_index_at(&self, id: PanelId, rect: Rect, row: u16) -> Option<usize> {
+        // List body sits inside the block border: first row is rect.y + 1.
+        if row <= rect.y || row + 1 >= rect.y + rect.height {
+            return None;
+        }
+        let panel = self.panel(id);
+        let offset = panel.scroll_state.offset();
+        let idx = offset + (row - rect.y - 1) as usize;
+        if idx < panel.items.len() {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
+    /// Handle a left click in a pane: focus it and select the item under the
+    /// cursor. Returns true if the click landed on the already-selected item
+    /// (the caller then treats it as an "activate": enter dir / open file).
+    pub fn click_pane(&mut self, id: PanelId, rect: Rect, row: u16) -> bool {
+        let already_focused = self.focus == id;
+        self.focus_panel(id);
+        if let Some(idx) = self.item_index_at(id, rect, row) {
+            let was_selected = already_focused && self.panel(id).selected == idx;
+            let p = self.panel_mut(id);
+            p.selected = idx;
+            p.scroll_state.select(Some(idx));
+            was_selected
+        } else {
+            false
+        }
+    }
+
+    /// Click inside the tree pane: select the node under the cursor, or toggle
+    /// it (expand/collapse) when it was already selected.
+    pub fn click_tree(&mut self, rect: Rect, row: u16) {
+        if row <= rect.y {
+            return;
+        }
+        let idx = (row - rect.y - 1) as usize;
+        if idx < self.tree_nodes.len() {
+            let was_selected = self.tree_selected == idx;
+            self.tree_selected = idx;
+            if was_selected {
+                self.toggle_tree_node();
+            } else {
+                self.update_right_panel_from_tree();
+            }
+        }
+    }
+
+    /// Scroll-wheel over a pane: focus it and move the selection.
+    pub fn scroll_pane(&mut self, id: PanelId, down: bool) {
+        self.focus_panel(id);
+        let p = self.panel_mut(id);
+        if down {
+            p.select_next();
+        } else {
+            p.select_prev();
         }
     }
 
@@ -1404,13 +1473,13 @@ mod tests {
     #[test]
     fn test_split_and_close() {
         let (root, mut app) = app_in("split");
-        assert_eq!(app.leaf_ids().len(), 2);
+        assert_eq!(app.root.leaves().len(), 2);
         app.split_focus(Dir::Vertical);
-        assert_eq!(app.leaf_ids().len(), 3);
+        assert_eq!(app.root.leaves().len(), 3);
         // focus is the new pane; partner is the old focus
         assert!(app.root.contains(app.focus));
         app.close_focus();
-        assert_eq!(app.leaf_ids().len(), 2);
+        assert_eq!(app.root.leaves().len(), 2);
         let _ = fs::remove_dir_all(&root);
     }
 
@@ -1418,9 +1487,9 @@ mod tests {
     fn test_cannot_close_last_pane() {
         let (root, mut app) = app_in("last");
         app.close_focus(); // 2 -> 1
-        assert_eq!(app.leaf_ids().len(), 1);
+        assert_eq!(app.root.leaves().len(), 1);
         app.close_focus(); // refuse
-        assert_eq!(app.leaf_ids().len(), 1);
+        assert_eq!(app.root.leaves().len(), 1);
         let _ = fs::remove_dir_all(&root);
     }
 }
