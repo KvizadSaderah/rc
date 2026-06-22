@@ -163,6 +163,8 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         Span::styled("Tree ",    label_style),
         Span::styled(" Ctrl+B ", ctrl_key),
         Span::styled("Bookmarks ", label_style),
+        Span::styled(" Ctrl+Y ", ctrl_key),
+        Span::styled("CopyPath ", label_style),
         Span::styled(" Ctrl+O ", ctrl_key),
         Span::styled("Shell ",   label_style),
         Span::styled(" Ctrl+S ", ctrl_key),
@@ -553,6 +555,9 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                     head("Bookmarks"),
                     row("Ctrl+B",        "Open bookmarks manager"),
                     row("Ctrl+D",        "Add current dir to bookmarks"),
+                    Line::from(""),
+                    head("Clipboard"),
+                    row("Ctrl+Y",        "Copy current panel path to clipboard"),
                 ],
                 2 => vec![
                     Line::from(""),

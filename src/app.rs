@@ -52,11 +52,9 @@ impl App {
                 }
             }
         }
-        let parent_dir = current_dir.parent().map(|p| p.to_path_buf()).unwrap_or_else(|| current_dir.clone());
-        
         Self {
-            left_panel: Panel::new(current_dir, config.show_hidden, config.sort_by.clone()),
-            right_panel: Panel::new(parent_dir, config.show_hidden, config.sort_by.clone()),
+            left_panel: Panel::new(current_dir.clone(), config.show_hidden, config.sort_by.clone()),
+            right_panel: Panel::new(current_dir, config.show_hidden, config.sort_by.clone()),
             active_panel: ActivePanel::Left,
             dialog: Dialog::None,
             status_message: String::new(),

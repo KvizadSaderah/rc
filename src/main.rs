@@ -50,6 +50,7 @@ fn print_help() {
          \x1b[36m  F6\x1b[0m  Move    \x1b[36mF7\x1b[0m  MkDir   \x1b[36mF8\x1b[0m  Delete  \x1b[36mF9\x1b[0m  Menu\n\
          \x1b[36m  Ctrl+S\x1b[0m  Settings    \x1b[36mCtrl+O\x1b[0m  Shell   \x1b[36mCtrl+B\x1b[0m  Bookmarks\n\
          \x1b[36m  Ctrl+T\x1b[0m  Tree view   \x1b[36mCtrl+P\x1b[0m  Preview \x1b[36m~\x1b[0m       Home\n\
+         \x1b[36m  Ctrl+Y\x1b[0m  Copy current panel path to clipboard\n\
          \n\
          \x1b[1mCONFIG:\x1b[0m  ~/.config/rust-commander/config.ini\n\
          \x1b[1mREPO:\x1b[0m    https://github.com/{REPO}"
