@@ -34,6 +34,7 @@ pub struct App {
     pub tree_selected: usize,
     pub preview_cache: Option<PreviewCache>,
     pub running_process: Option<RunningProcess>,
+    pub preview_scroll_offset: usize,
 }
 
 impl App {
@@ -67,6 +68,7 @@ impl App {
             tree_selected: 0,
             preview_cache: None,
             running_process: None,
+            preview_scroll_offset: 0,
         }
     }
 
@@ -455,7 +457,7 @@ impl App {
         self.running_process = None;
     }
 
-    pub fn handle_enter(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
+    pub fn handle_enter_or_right(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, is_enter: bool) {
         let selected_item = {
             let panel = self.get_active_panel();
             panel.get_selected_item().cloned()
@@ -470,19 +472,23 @@ impl App {
                     self.status_message = format!("Entered: {}", item.name);
                 }
             } else if item.path.is_file() {
-                // Open in external editor (nvim/vim/nano — whatever is configured)
-                match edit_file(&item.path, &self.config.default_editor) {
-                    Ok(_) => {
-                        self.status_message = format!("Edited: {}", item.name);
-                        self.refresh_panels();
-                        let _ = terminal.clear();
+                if is_enter {
+                    // Open in external editor (nvim/vim/nano — whatever is configured)
+                    match edit_file(&item.path, &self.config.default_editor) {
+                        Ok(_) => {
+                            self.status_message = format!("Edited: {}", item.name);
+                            self.refresh_panels();
+                            let _ = terminal.clear();
+                        }
+                        Err(e) => {
+                            let _ = terminal.clear();
+                            self.dialog = Dialog::Error {
+                                message: format!("Failed to open editor: {}", e),
+                            };
+                        }
                     }
-                    Err(e) => {
-                        let _ = terminal.clear();
-                        self.dialog = Dialog::Error {
-                            message: format!("Failed to open editor: {}", e),
-                        };
-                    }
+                } else {
+                    self.status_message = "Press Enter to edit/open file".to_string();
                 }
             }
         }
@@ -693,7 +699,10 @@ impl App {
                 .trim_matches(|c| c == '\'' || c == '"');
             let interactive_bins = [
                 "vim", "vi", "nano", "emacs", "neovim", "nvim", "top", 
-                "htop", "less", "more", "ssh", "sftp", "man", "tail", "watch"
+                "htop", "less", "more", "ssh", "sftp", "man", "tail", "watch",
+                "python", "python3", "node", "git", "docker", "docker-compose",
+                "gdb", "irb", "nc", "telnet", "ping", "tmux", "screen",
+                "bash", "zsh", "sh"
             ];
             interactive_bins.contains(&first_word)
         };
@@ -817,11 +826,7 @@ impl App {
             for path in &marked_paths {
                 let name = path.file_name().unwrap_or_default();
                 let target = dest_dir.join(name);
-                let res = if path.is_dir() {
-                    copy_dir_all(path, &target)
-                } else {
-                    fs::copy(path, &target).map(|_| ())
-                };
+                let res = copy_item(path, &target);
                 if let Err(e) = res {
                     err = Some(e);
                     break;
@@ -832,11 +837,7 @@ impl App {
             // Single selection copy
             let name = source.file_name().unwrap_or_default();
             let target = dest_dir.join(name);
-            if source.is_dir() {
-                copy_dir_all(&source, &target)
-            } else {
-                fs::copy(&source, &target).map(|_| ())
-            }
+            copy_item(&source, &target)
         };
 
         match result {
@@ -883,7 +884,7 @@ impl App {
             for path in &marked_paths {
                 let name = path.file_name().unwrap_or_default();
                 let target = dest_dir.join(name);
-                if let Err(e) = fs::rename(path, &target) {
+                if let Err(e) = move_item(path, &target) {
                     err = Some(e);
                     break;
                 }
@@ -903,7 +904,7 @@ impl App {
             if let Some(parent) = target.parent() {
                 let _ = fs::create_dir_all(parent);
             }
-            fs::rename(&source, &target)
+            move_item(&source, &target)
         };
 
         match result {
@@ -947,6 +948,41 @@ impl App {
         }
     }
 
+    pub fn initiate_touch(&mut self) {
+        self.dialog = Dialog::InputTouch {
+            input: InputField::new(String::new()),
+        };
+    }
+
+    pub fn execute_touch(&mut self, file_name: String) {
+        let trimmed = file_name.trim();
+        if trimmed.is_empty() {
+            self.dialog = Dialog::Error { message: "File name cannot be empty".to_string() };
+            return;
+        }
+
+        let active_dir = self.get_active_panel().path.clone();
+        let target_path = active_dir.join(trimmed);
+        if target_path.exists() {
+            self.dialog = Dialog::Error {
+                message: format!("Error: File or directory '{}' already exists", trimmed),
+            };
+            return;
+        }
+
+        match fs::File::create(&target_path) {
+            Ok(_) => {
+                self.status_message = format!("Created file '{}'", trimmed);
+                self.refresh_panels();
+            }
+            Err(e) => {
+                self.dialog = Dialog::Error {
+                    message: format!("Failed to create file: {}", e),
+                };
+            }
+        }
+    }
+
     pub fn initiate_delete(&mut self) {
         let marked_paths: Vec<PathBuf> = self.get_active_panel().marked.iter().cloned().collect();
         if !marked_paths.is_empty() {
@@ -970,7 +1006,10 @@ impl App {
             // Bulk delete
             let mut err = None;
             for p in &marked_paths {
-                let res = if p.is_dir() {
+                let is_symlink = p.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false);
+                let res = if is_symlink {
+                    fs::remove_file(p)
+                } else if p.is_dir() {
                     fs::remove_dir_all(p)
                 } else {
                     fs::remove_file(p)
@@ -983,7 +1022,10 @@ impl App {
             if let Some(e) = err { Err(e) } else { Ok(()) }
         } else {
             // Single delete
-            if path.is_dir() {
+            let is_symlink = path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false);
+            if is_symlink {
+                fs::remove_file(&path)
+            } else if path.is_dir() {
                 fs::remove_dir_all(&path)
             } else {
                 fs::remove_file(&path)
@@ -1004,7 +1046,108 @@ impl App {
             }
         }
     }
+
+    pub fn initiate_properties(&mut self) {
+        if let Some(item) = self.get_active_panel().get_selected_item() {
+            if item.name == ".." {
+                return;
+            }
+            let name = item.name.clone();
+            let path = item.path.clone();
+            
+            let metadata = match path.symlink_metadata() {
+                Ok(m) => m,
+                Err(e) => {
+                    self.dialog = Dialog::Error {
+                        message: format!("Failed to read metadata: {}", e),
+                    };
+                    return;
+                }
+            };
+            
+            let size_str = if metadata.is_dir() {
+                "Directory".to_string()
+            } else {
+                format_size(metadata.len())
+            };
+            
+            #[cfg(unix)]
+            let (permissions_str, owner_str) = {
+                use std::os::unix::fs::MetadataExt;
+                let mode = metadata.mode();
+                let uid = metadata.uid();
+                let gid = metadata.gid();
+                
+                let is_dir = metadata.is_dir();
+                let is_symlink = metadata.file_type().is_symlink();
+                
+                let perm = format_permissions(mode, is_dir, is_symlink);
+                let owner = format!("UID: {}, GID: {}", uid, gid);
+                (perm, owner)
+            };
+            
+            #[cfg(not(unix))]
+            let (permissions_str, owner_str) = {
+                let perm = if metadata.permissions().readonly() {
+                    "r--------".to_string()
+                } else {
+                    "rw-------".to_string()
+                };
+                let owner = "N/A".to_string();
+                (perm, owner)
+            };
+            
+            let path_str = if metadata.file_type().is_symlink() {
+                match fs::read_link(&path) {
+                    Ok(target) => format!("{} -> {}", path.display(), target.display()),
+                    Err(_) => path.display().to_string(),
+                }
+            } else {
+                path.display().to_string()
+            };
+
+            let format_time = |t: std::time::SystemTime| -> String {
+                let datetime: chrono::DateTime<chrono::Local> = t.into();
+                datetime.format("%Y-%m-%d %H:%M:%S").to_string()
+            };
+            
+            let modified_str = metadata.modified().map(format_time).unwrap_or_else(|_| "N/A".to_string());
+            let created_str = metadata.created().map(format_time).unwrap_or_else(|_| "N/A".to_string());
+            
+            self.dialog = Dialog::Properties {
+                name,
+                path_str,
+                size_str,
+                permissions_str,
+                modified_str,
+                created_str,
+                owner_str,
+            };
+        }
+    }
 }
+
+fn format_permissions(mode: u32, is_dir: bool, is_symlink: bool) -> String {
+    let mut s = String::with_capacity(10);
+    if is_dir {
+        s.push('d');
+    } else if is_symlink {
+        s.push('l');
+    } else {
+        s.push('-');
+    }
+    
+    let chars = ['r', 'w', 'x'];
+    for i in (0..3).rev() {
+        let shift = i * 3;
+        let bits = (mode >> shift) & 0o7;
+        s.push(if bits & 4 != 0 { chars[0] } else { '-' });
+        s.push(if bits & 2 != 0 { chars[1] } else { '-' });
+        s.push(if bits & 1 != 0 { chars[2] } else { '-' });
+    }
+    s
+}
+
 
 // Suspension editor helper
 pub fn edit_file(path: &Path, editor_bin: &str) -> io::Result<()> {

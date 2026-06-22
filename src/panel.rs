@@ -26,6 +26,7 @@ pub struct Panel {
     pub marked: HashSet<PathBuf>, // Multi-selection Set (Tagged items)
     pub git_branch: Option<String>,
     pub git_statuses: std::collections::HashMap<PathBuf, String>,
+    pub last_git_query: Option<std::time::Instant>,
 }
 
 impl Panel {
@@ -42,6 +43,7 @@ impl Panel {
             marked: HashSet::new(),
             git_branch: None,
             git_statuses: std::collections::HashMap::new(),
+            last_git_query: None,
         };
         panel.refresh();
         panel
@@ -111,61 +113,69 @@ impl Panel {
             self.scroll_state.select(Some(self.selected));
         }
 
-        // Query Git status if we are in a Git workspace
-        self.git_branch = None;
-        self.git_statuses.clear();
+        // Query Git status if we are in a Git workspace and enough time has elapsed
+        let should_query_git = match self.last_git_query {
+            None => true,
+            Some(inst) => inst.elapsed() >= std::time::Duration::from_secs(10),
+        };
 
-        if let Ok(out) = std::process::Command::new("git")
-            .arg("rev-parse")
-            .arg("--is-inside-work-tree")
-            .current_dir(&self.path)
-            .output() {
-            if out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true" {
-                if let Ok(branch_out) = std::process::Command::new("git")
-                    .arg("branch")
-                    .arg("--show-current")
-                    .current_dir(&self.path)
-                    .output() {
-                    let b_name = String::from_utf8_lossy(&branch_out.stdout).trim().to_string();
-                    if !b_name.is_empty() {
-                        self.git_branch = Some(b_name);
-                    } else if let Ok(rev_out) = std::process::Command::new("git")
-                        .arg("rev-parse")
-                        .arg("--short")
-                        .arg("HEAD")
+        if should_query_git {
+            self.git_branch = None;
+            self.git_statuses.clear();
+            self.last_git_query = Some(std::time::Instant::now());
+
+            if let Ok(out) = std::process::Command::new("git")
+                .arg("rev-parse")
+                .arg("--is-inside-work-tree")
+                .current_dir(&self.path)
+                .output() {
+                if out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true" {
+                    if let Ok(branch_out) = std::process::Command::new("git")
+                        .arg("branch")
+                        .arg("--show-current")
                         .current_dir(&self.path)
                         .output() {
-                        self.git_branch = Some(format!("detached@{}", String::from_utf8_lossy(&rev_out.stdout).trim()));
+                        let b_name = String::from_utf8_lossy(&branch_out.stdout).trim().to_string();
+                        if !b_name.is_empty() {
+                            self.git_branch = Some(b_name);
+                        } else if let Ok(rev_out) = std::process::Command::new("git")
+                            .arg("rev-parse")
+                            .arg("--short")
+                            .arg("HEAD")
+                            .current_dir(&self.path)
+                            .output() {
+                            self.git_branch = Some(format!("detached@{}", String::from_utf8_lossy(&rev_out.stdout).trim()));
+                        }
                     }
-                }
 
-                if let Ok(status_out) = std::process::Command::new("git")
-                    .arg("status")
-                    .arg("--porcelain")
-                    .current_dir(&self.path)
-                    .output() {
-                    let status_str = String::from_utf8_lossy(&status_out.stdout);
-                    if let Ok(root_out) = std::process::Command::new("git")
-                        .arg("rev-parse")
-                        .arg("--show-toplevel")
+                    if let Ok(status_out) = std::process::Command::new("git")
+                        .arg("status")
+                        .arg("--porcelain")
                         .current_dir(&self.path)
                         .output() {
-                        let repo_root = PathBuf::from(String::from_utf8_lossy(&root_out.stdout).trim());
-                        for line in status_str.lines() {
-                            if line.len() > 3 {
-                                let code = line[..2].trim().to_string();
-                                let rel_path = &line[3..];
-                                let actual_rel_path = if let Some(idx) = rel_path.find(" -> ") {
-                                    &rel_path[idx + 4..]
-                                } else {
-                                    rel_path
-                                };
-                                let cleaned_rel = actual_rel_path.trim_matches('"');
-                                let abs_path = repo_root.join(cleaned_rel);
-                                if let Ok(canon_path) = abs_path.canonicalize() {
-                                    self.git_statuses.insert(canon_path, code);
-                                } else {
-                                    self.git_statuses.insert(abs_path, code);
+                        let status_str = String::from_utf8_lossy(&status_out.stdout);
+                        if let Ok(root_out) = std::process::Command::new("git")
+                            .arg("rev-parse")
+                            .arg("--show-toplevel")
+                            .current_dir(&self.path)
+                            .output() {
+                            let repo_root = PathBuf::from(String::from_utf8_lossy(&root_out.stdout).trim());
+                            for line in status_str.lines() {
+                                if line.len() > 3 {
+                                    let code = line[..2].trim().to_string();
+                                    let rel_path = &line[3..];
+                                    let actual_rel_path = if let Some(idx) = rel_path.find(" -> ") {
+                                        &rel_path[idx + 4..]
+                                    } else {
+                                        rel_path
+                                    };
+                                    let cleaned_rel = actual_rel_path.trim_matches('"');
+                                    let abs_path = repo_root.join(cleaned_rel);
+                                    if let Ok(canon_path) = abs_path.canonicalize() {
+                                        self.git_statuses.insert(canon_path, code);
+                                    } else {
+                                        self.git_statuses.insert(abs_path, code);
+                                    }
                                 }
                             }
                         }
@@ -183,6 +193,7 @@ impl Panel {
                 self.filter = None;
                 self.marked.clear(); // Reset selections on dir transition
                 self.selected = 0;
+                self.last_git_query = None;
                 self.refresh();
                 Ok(())
             }
