@@ -29,6 +29,7 @@ pub enum OpKind {
     Copy,
     Move,
     Delete,
+    Trash,
 }
 
 impl OpKind {
@@ -37,6 +38,7 @@ impl OpKind {
             OpKind::Copy => "Copying",
             OpKind::Move => "Moving",
             OpKind::Delete => "Deleting",
+            OpKind::Trash => "Trashing",
         }
     }
 
@@ -45,6 +47,7 @@ impl OpKind {
             OpKind::Copy => "Copied",
             OpKind::Move => "Moved",
             OpKind::Delete => "Deleted",
+            OpKind::Trash => "Trashed",
         }
     }
 }
@@ -192,6 +195,7 @@ impl Worker {
                 OpKind::Delete => self.delete_tree(src),
                 OpKind::Copy => self.copy_tree(src, dst),
                 OpKind::Move => self.move_one(src, dst),
+                OpKind::Trash => self.trash_one(src),
             };
             if let Err(e) = result
                 && !is_cancelled_err(&e) {
@@ -288,6 +292,19 @@ impl Worker {
                 self.delete_tree(src)
             }
             Err(e) => Err(e),
+        }
+    }
+
+    // ---- Trash -------------------------------------------------------------
+
+    fn trash_one(&self, path: &Path) -> io::Result<()> {
+        self.send(Msg::StartFile(display(path)));
+        match trash::delete(path) {
+            Ok(()) => {
+                self.send(Msg::FileDone);
+                Ok(())
+            }
+            Err(e) => Err(io::Error::other(format!("trash failed: {}", e))),
         }
     }
 

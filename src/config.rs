@@ -15,6 +15,7 @@ pub struct Config {
     pub bookmarks: Vec<PathBuf>,
     pub theme: String,
     pub border_type: String,   // "plain", "rounded", "thick", "double"
+    pub use_trash: bool,       // send deletes to OS trash instead of permanent removal
 }
 
 #[derive(Clone, Debug)]
@@ -90,6 +91,7 @@ pub fn load_config() -> Config {
         bookmarks: Vec::new(),
         theme: "eve".to_string(),
         border_type: "plain".to_string(),
+        use_trash: true,
     };
 
     if let Some(path) = get_config_path() {
@@ -110,6 +112,7 @@ pub fn load_config() -> Config {
                         "confirm_quit" => config.confirm_quit = parts[1] == "true",
                         "theme" => config.theme = parts[1].to_string(),
                         "border_type" => config.border_type = parts[1].to_string(),
+                        "use_trash" => config.use_trash = parts[1] == "true",
                         "bookmarks" => {
                             config.bookmarks = parts[1]
                                 .split(',')
@@ -147,6 +150,7 @@ pub fn save_config(config: &Config) -> io::Result<()> {
              confirm_quit = {}\n\
              theme = {}\n\
              border_type = {}\n\
+             use_trash = {}\n\
              bookmarks = {}\n\n\
              [keys]\n\
              ; Customize shortcuts here. Format: command = key, modifiers+key\n\
@@ -160,7 +164,7 @@ pub fn save_config(config: &Config) -> io::Result<()> {
              ; toggle_hidden = .\n\
              ; toggle_preview = ctrl+p\n\
              ; select_item = space\n",
-            config.show_hidden, config.sort_by, config.keybindings, config.default_editor, config.editor_mode, config.confirm_quit, config.theme, config.border_type, bookmarks_str
+            config.show_hidden, config.sort_by, config.keybindings, config.default_editor, config.editor_mode, config.confirm_quit, config.theme, config.border_type, config.use_trash, bookmarks_str
         );
         fs::write(path, content)?;
     }
