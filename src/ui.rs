@@ -22,6 +22,20 @@ pub fn get_border_type(border_str: &str) -> BorderType {
     }
 }
 
+/// Render a path for display: collapse the home directory to `~`.
+pub fn pretty_path(p: &std::path::Path) -> String {
+    if let Some(home) = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
+        let home = std::path::PathBuf::from(home);
+        if let Ok(rest) = p.strip_prefix(&home) {
+            if rest.as_os_str().is_empty() {
+                return "~".to_string();
+            }
+            return format!("~/{}", rest.to_string_lossy());
+        }
+    }
+    p.to_string_lossy().into_owned()
+}
+
 
 // =============================================================================
 // UI Drawing Layouts & Formatting
@@ -60,29 +74,30 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     };
 
     let active_tab_style = Style::default().bg(theme.active_border).fg(Color::Black).bold();
-    let idle_tab_style   = Style::default().fg(Color::White);
-    let left_style  = if active_menu_idx == Some(0) { active_tab_style } else { idle_tab_style };
-    let file_style  = if active_menu_idx == Some(1) { active_tab_style } else { idle_tab_style };
-    let cmd_style   = if active_menu_idx == Some(2) { active_tab_style } else { idle_tab_style };
-    let opt_style   = if active_menu_idx == Some(3) { active_tab_style } else { idle_tab_style };
-    let right_style = if active_menu_idx == Some(4) { active_tab_style } else { idle_tab_style };
+    let idle_tab_style   = Style::default().fg(Color::Rgb(203, 213, 225));
+    let tab = |idx: usize, label: &str| -> Span<'static> {
+        let s = if active_menu_idx == Some(idx) { active_tab_style } else { idle_tab_style };
+        Span::styled(format!(" {} ", label), s)
+    };
 
-    let menu_spans = vec![
-        Span::raw("  "),
-        Span::styled(" Left ",    left_style),
-        Span::raw("   "),
-        Span::styled(" File ",    file_style),
-        Span::raw("   "),
-        Span::styled(" Command ", cmd_style),
-        Span::raw("   "),
-        Span::styled(" Options ", opt_style),
-        Span::raw("   "),
-        Span::styled(" Right ",   right_style),
-        Span::raw("   │ "),
-        Span::styled("RUST COMMANDER", Style::default().fg(theme.accent).bold()),
-        Span::styled(format!(" [Bindings: {}]", app.config.keybindings), Style::default().fg(Color::DarkGray)),
+    let mut left_spans = vec![
+        Span::raw(" "),
+        tab(0, "Left"),
+        tab(1, "File"),
+        tab(2, "Command"),
+        tab(3, "Options"),
+        tab(4, "Right"),
     ];
-    f.render_widget(Paragraph::new(Line::from(menu_spans)).bg(theme.header_bg), header_rect);
+    let left_len: usize = left_spans.iter().map(|s| s.content.chars().count()).sum();
+
+    let brand = "rust-commander";
+    let bindings = format!(" {} ", app.config.keybindings);
+    let right_len = brand.chars().count() + bindings.chars().count() + 1;
+    let pad = (header_rect.width as usize).saturating_sub(left_len + right_len);
+    left_spans.push(Span::raw(" ".repeat(pad)));
+    left_spans.push(Span::styled(brand, Style::default().fg(theme.accent).bold()));
+    left_spans.push(Span::styled(bindings, Style::default().fg(Color::Rgb(100, 116, 139))));
+    f.render_widget(Paragraph::new(Line::from(left_spans)).bg(theme.header_bg), header_rect);
 
     let border_type = get_border_type(&app.config.border_type);
 
@@ -143,9 +158,40 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             ));
         }
         _ => {
-            let status_para = Paragraph::new(app.status_message.as_str())
-                .style(Style::default().bg(Color::Rgb(15, 23, 42)).fg(Color::Rgb(241, 245, 249)));
-            f.render_widget(status_para, status_rect);
+            // Left: status message, or the focused selection (name + size).
+            let panel = app.get_active_panel();
+            let left = if !app.status_message.is_empty() {
+                format!(" {}", app.status_message)
+            } else if let Some(it) = panel.get_selected_item() {
+                let meta = if it.is_dir || it.name == ".." {
+                    "<dir>".to_string()
+                } else {
+                    format_size(it.size)
+                };
+                format!(" {}   {}", it.name, meta)
+            } else {
+                String::new()
+            };
+            // Right: position in list + pane count when tiled.
+            let pos = panel.selected + 1;
+            let total = panel.items.len();
+            let panes = app.root.leaves().len();
+            let right = if panes > 2 {
+                format!("{}/{}  ·  {} panes ", pos, total, panes)
+            } else {
+                format!("{}/{} ", pos, total)
+            };
+            let w = status_rect.width as usize;
+            let pad = w.saturating_sub(left.chars().count() + right.chars().count());
+            let line = Line::from(vec![
+                Span::styled(left, Style::default().fg(Color::Rgb(241, 245, 249))),
+                Span::raw(" ".repeat(pad)),
+                Span::styled(right, Style::default().fg(Color::Rgb(148, 163, 184))),
+            ]);
+            f.render_widget(
+                Paragraph::new(line).style(Style::default().bg(Color::Rgb(15, 23, 42))),
+                status_rect,
+            );
         }
     }
 
@@ -1269,27 +1315,41 @@ fn draw_live_preview(f: &mut Frame, area: Rect, selected: Option<FileItem>, app:
 }
 
 fn draw_panel(f: &mut Frame, area: Rect, panel: &mut Panel, is_active: bool, theme: &Theme, border_type: BorderType) {
-    let title_prefix = if is_active { "▶ " } else { "  " };
     let border_color = if is_active { theme.active_border } else { theme.inactive_border };
+    let title_fg = if is_active { Color::White } else { Color::Rgb(120, 130, 145) };
 
-    let mut details = format!(" [Sort: {}]", panel.sort_by.to_uppercase());
-    if let Some(ref filter) = panel.filter {
-        details.push_str(&format!(" [Filter: {}]", filter));
-    }
-    if !panel.marked.is_empty() {
-        details.push_str(&format!(" [Marked: {}]", panel.marked.len()));
-    }
-
+    // Focus marker + path (home collapsed to ~).
+    let marker = if is_active { "● " } else { "  " };
     let mut title_spans = vec![
-        Span::styled(format!("{}📁 {}", title_prefix, panel.path.to_string_lossy()), Style::default().fg(if is_active { Color::White } else { Color::Gray }).bold()),
+        Span::styled(marker, Style::default().fg(border_color).bold()),
+        Span::styled(pretty_path(&panel.path), Style::default().fg(title_fg).bold()),
     ];
     if let Some(ref branch) = panel.git_branch {
-        title_spans.push(Span::styled(format!(" [git:{}]", branch), Style::default().fg(theme.active_border).bold()));
+        title_spans.push(Span::styled(
+            format!("  {}", branch),
+            Style::default().fg(theme.active_border),
+        ));
     }
-    title_spans.push(Span::styled(format!("{} ", details), Style::default().fg(if is_active { Color::White } else { Color::Gray })));
+    if let Some(ref filter) = panel.filter {
+        title_spans.push(Span::styled(
+            format!("  /{}", filter),
+            Style::default().fg(Color::Yellow),
+        ));
+    }
+    if !panel.marked.is_empty() {
+        title_spans.push(Span::styled(
+            format!("  ✔{}", panel.marked.len()),
+            Style::default().fg(theme.text_highlight).bold(),
+        ));
+    }
+    title_spans.push(Span::raw(" "));
+
+    // Bottom border shows sort mode + item count — quiet, right-aligned feel.
+    let footer = format!(" {} · {} items ", panel.sort_by.to_lowercase(), panel.items.len().saturating_sub(1));
 
     let block = Block::default()
         .title(Line::from(title_spans))
+        .title_bottom(Line::from(Span::styled(footer, Style::default().fg(Color::Rgb(110, 120, 135)))).alignment(Alignment::Right))
         .borders(Borders::ALL)
         .border_type(border_type)
         .border_style(Style::default().fg(border_color))
@@ -1360,7 +1420,8 @@ fn draw_panel(f: &mut Frame, area: Rect, panel: &mut Panel, is_active: bool, the
         let width = area.width.saturating_sub(2);
         let time_w = 19;
         let size_w = 10;
-        let name_w = width.saturating_sub(time_w + size_w + 3) as usize;
+        // Reserve one column for the selection gutter on the left.
+        let name_w = width.saturating_sub(time_w + size_w + 4) as usize;
 
         let final_name_str = if raw_name.len() + git_str.len() > name_w {
             let max_raw = name_w.saturating_sub(git_str.len() + 3);
@@ -1385,13 +1446,21 @@ fn draw_panel(f: &mut Frame, area: Rect, panel: &mut Panel, is_active: bool, the
             None => Span::raw(""),
         };
 
+        let gutter = if is_selected {
+            if is_active { "▌" } else { "▎" }
+        } else {
+            " "
+        };
+        let gutter_span = Span::styled(gutter, Style::default().fg(if is_active { theme.active_border } else { theme.inactive_border }));
+
         let line = Line::from(vec![
+            gutter_span,
             Span::raw(final_name_str),
             git_span,
             Span::raw(padding),
-            Span::raw(" │ "),
+            Span::styled(" │ ", Style::default().fg(Color::Rgb(70, 80, 95))),
             Span::raw(format!("{:>width$}", size_str, width = size_w as usize)),
-            Span::raw(" │ "),
+            Span::styled(" │ ", Style::default().fg(Color::Rgb(70, 80, 95))),
             Span::raw(time_str),
         ]);
 
