@@ -37,7 +37,8 @@ pub enum Node {
 /// A resize seam between two children, with the path to its Split node so the
 /// caller can adjust that node's ratio.
 pub struct Divider {
-    pub rect: Rect,
+    pub rect: Rect,    // the 1px seam, for hit-testing
+    pub area: Rect,    // the split's full area, for computing the dragged ratio
     pub dir: Dir,
     pub path: Vec<u8>, // 0 = first child, 1 = second child
 }
@@ -279,6 +280,7 @@ impl Node {
             };
             out.push(Divider {
                 rect: seam,
+                area,
                 dir: *dir,
                 path: path.clone(),
             });

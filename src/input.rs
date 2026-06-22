@@ -19,6 +19,25 @@ use crate::ui::{ui, centered_rect};
 // Keyboard Inputs Router
 // =============================================================================
 
+/// The workspace rectangle (between the 1-row header and the 2-row status/legend
+/// footer), matching the layout in `ui()`.
+fn workspace_area(terminal: &Terminal<CrosstermBackend<io::Stdout>>) -> Rect {
+    let (w, h) = match terminal.size() {
+        Ok(s) => (s.width, s.height),
+        Err(_) => (80, 24),
+    };
+    Rect::new(0, 1, w, h.saturating_sub(3))
+}
+
+/// True if a cell falls within (or one cell either side of) a 1px seam.
+fn hit(seam: Rect, col: u16, row: u16) -> bool {
+    let x0 = seam.x.saturating_sub(1);
+    let x1 = seam.x + seam.width;
+    let y0 = seam.y;
+    let y1 = seam.y + seam.height;
+    col >= x0 && col <= x1 && row >= y0 && row < y1
+}
+
 pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> io::Result<()> {
     // Event-driven refresh via notify, with a slow periodic fallback if the
     // platform watcher can't be set up.
@@ -28,6 +47,9 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
     let mut last_fallback = std::time::Instant::now();
     const DEBOUNCE: Duration = Duration::from_millis(150);
     const FALLBACK: Duration = Duration::from_secs(4);
+
+    // Active divider drag: (split path, split area, direction).
+    let mut drag: Option<(Vec<u8>, Rect, crate::layout::Dir)> = None;
 
     loop {
         // Drain output from any running background process
@@ -101,6 +123,76 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                     event::MouseEventKind::ScrollDown => {
                         let max = output_lines.len().saturating_sub(display_height);
                         *scroll_offset = (*scroll_offset + 3).min(max);
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Main-view mouse: click to focus/select, click-again to open,
+            // wheel to scroll, drag a seam to resize, click header to open menu.
+            if matches!(app.dialog, Dialog::None) && !app.is_fs_busy() {
+                use crossterm::event::{MouseButton, MouseEventKind};
+                let (col, row) = (mouse.column, mouse.row);
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if row == 0 {
+                            // Header row → open the menu bar.
+                            app.dialog = Dialog::Menu { active_menu: 0, active_item: None };
+                            continue;
+                        }
+                        // Start a divider drag if the click landed on a seam.
+                        let ws = workspace_area(terminal);
+                        if let Some(d) = app
+                            .root
+                            .dividers(ws)
+                            .into_iter()
+                            .find(|d| hit(d.rect, col, row))
+                        {
+                            drag = Some((d.path, d.area, d.dir));
+                            continue;
+                        }
+                        // Otherwise focus the pane and select the item under the cursor.
+                        if let Some((id, rect)) = app.pane_at(col, row) {
+                            if app.tree_mode && id == app.root.first_leaf() {
+                                app.click_tree(rect, row);
+                            } else {
+                                let activate = app.click_pane(id, rect, row);
+                                if activate {
+                                    app.handle_enter_or_right(terminal, true);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        if let Some((path, area, dir)) = &drag {
+                            let ratio = match dir {
+                                crate::layout::Dir::Horizontal => {
+                                    col.saturating_sub(area.x) as f32 / area.width.max(1) as f32
+                                }
+                                crate::layout::Dir::Vertical => {
+                                    row.saturating_sub(area.y) as f32 / area.height.max(1) as f32
+                                }
+                            };
+                            app.root.set_ratio(path, ratio);
+                        }
+                        continue;
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        drag = None;
+                        continue;
+                    }
+                    MouseEventKind::ScrollDown => {
+                        if let Some((id, _)) = app.pane_at(col, row) {
+                            app.scroll_pane(id, true);
+                        }
+                        continue;
+                    }
+                    MouseEventKind::ScrollUp => {
+                        if let Some((id, _)) = app.pane_at(col, row) {
+                            app.scroll_pane(id, false);
+                        }
                         continue;
                     }
                     _ => {}
