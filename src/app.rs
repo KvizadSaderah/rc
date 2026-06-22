@@ -872,9 +872,19 @@ impl App {
             }
             if let Some(e) = err { Err(e) } else { Ok(()) }
         } else {
-            // Single rename / move
-            let name = source.file_name().unwrap_or_default();
-            let target = dest_dir.join(name);
+            // Single rename / move:
+            // If destination is an existing directory → move into it (append filename).
+            // If destination looks like a full path → use as-is (rename).
+            let target = if dest_dir.is_dir() {
+                let name = source.file_name().unwrap_or_default();
+                dest_dir.join(name)
+            } else {
+                dest_dir.clone()
+            };
+            // Create parent directories if they don't exist
+            if let Some(parent) = target.parent() {
+                let _ = fs::create_dir_all(parent);
+            }
             fs::rename(&source, &target)
         };
 
