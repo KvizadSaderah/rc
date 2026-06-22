@@ -1012,6 +1012,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             let text_width = inner.width.saturating_sub(line_num_width as u16 + 2) as usize;
 
             let mut display_lines: Vec<Line> = Vec::new();
+            #[allow(clippy::needless_range_loop)]
             for row_idx in *scroll_row..(*scroll_row + editor_height).min(lines.len()) {
                 let is_current = row_idx == *cursor_row;
                 let num_style = if is_current {
@@ -1559,8 +1560,8 @@ fn parse_ansi_text(text: &str) -> Vec<Line<'static>> {
                                                     }
                                                     i += 2;
                                                 }
-                                            } else if parts[i + 1] == "2" {
-                                                if i + 4 < parts.len() {
+                                            } else if parts[i + 1] == "2"
+                                                && i + 4 < parts.len() {
                                                     if let (Ok(r), Ok(g), Ok(b)) = (
                                                         parts[i + 2].parse::<u8>(),
                                                         parts[i + 3].parse::<u8>(),
@@ -1570,11 +1571,10 @@ fn parse_ansi_text(text: &str) -> Vec<Line<'static>> {
                                                     }
                                                     i += 4;
                                                 }
-                                            }
                                         }
                                     }
-                                    48 => {
-                                        if i + 1 < parts.len() {
+                                    48
+                                        if i + 1 < parts.len() => {
                                             if parts[i + 1] == "5" {
                                                 if i + 2 < parts.len() {
                                                     if let Ok(idx) = parts[i + 2].parse::<u8>() {
@@ -1582,8 +1582,8 @@ fn parse_ansi_text(text: &str) -> Vec<Line<'static>> {
                                                     }
                                                     i += 2;
                                                 }
-                                            } else if parts[i + 1] == "2" {
-                                                if i + 4 < parts.len() {
+                                            } else if parts[i + 1] == "2"
+                                                && i + 4 < parts.len() {
                                                     if let (Ok(r), Ok(g), Ok(b)) = (
                                                         parts[i + 2].parse::<u8>(),
                                                         parts[i + 3].parse::<u8>(),
@@ -1593,9 +1593,7 @@ fn parse_ansi_text(text: &str) -> Vec<Line<'static>> {
                                                     }
                                                     i += 4;
                                                 }
-                                            }
                                         }
-                                    }
                                     _ => {}
                                 }
                             }

@@ -103,11 +103,10 @@ impl JobState {
                 }
             }
         }
-        if self.finished {
-            if let Some(h) = self.handle.take() {
+        if self.finished
+            && let Some(h) = self.handle.take() {
                 let _ = h.join();
             }
-        }
         self.finished && !was_finished
     }
 
@@ -194,11 +193,10 @@ impl Worker {
                 OpKind::Copy => self.copy_tree(src, dst),
                 OpKind::Move => self.move_one(src, dst),
             };
-            if let Err(e) = result {
-                if !is_cancelled_err(&e) {
+            if let Err(e) = result
+                && !is_cancelled_err(&e) {
                     self.send(Msg::Error(format!("{}: {}", display(src), e)));
                 }
-            }
         }
 
         self.send(Msg::Done);
@@ -224,10 +222,7 @@ impl Worker {
         } else if ft.is_dir() {
             fs::create_dir_all(dst)?;
             // Collect child errors but keep copying siblings.
-            let entries = match fs::read_dir(src) {
-                Ok(e) => e,
-                Err(e) => return Err(e),
-            };
+            let entries = fs::read_dir(src)?;
             for entry in entries.flatten() {
                 if self.cancelled() {
                     return Err(cancelled());

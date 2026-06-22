@@ -127,11 +127,10 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
             continue;
         }
 
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if !matches!(app.dialog, Dialog::TerminalOverlay { .. }) {
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
+            && !matches!(app.dialog, Dialog::TerminalOverlay { .. }) {
                 app.should_quit = true;
             }
-        }
 
         let active_dir = match app.active_panel {
             ActivePanel::Left => app.left_panel.path.clone(),
@@ -406,8 +405,8 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                             app.status_message = "Folder is already bookmarked".to_string();
                         }
                     }
-                    KeyCode::Char('d') | KeyCode::Char('D') => {
-                        if !app.config.bookmarks.is_empty() {
+                    KeyCode::Char('d') | KeyCode::Char('D')
+                        if !app.config.bookmarks.is_empty() => {
                             app.config.bookmarks.remove(*selected_idx);
                             let _ = save_config(&app.config);
                             if *selected_idx > 0 && *selected_idx >= app.config.bookmarks.len() {
@@ -415,7 +414,6 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                             }
                             app.status_message = "Removed bookmark".to_string();
                         }
-                    }
                     _ => {}
                 }
                 Dialog::TerminalOverlay { input, output_lines, scroll_offset, command_history, history_index } => {
@@ -448,7 +446,7 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                         KeyCode::Enter => {
                             let text = input.text.clone();
                             if !text.is_empty() {
-                                if command_history.last().map_or(true, |last| last != &text) {
+                                if command_history.last() != Some(&text) {
                                     command_history.push(text.clone());
                                 }
                                 *history_index = None;
@@ -465,8 +463,8 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                                         output_lines.push(format!("→ {}", home_path.display()));
                                         cd_target = Some(home_path);
                                     }
-                                } else if trimmed.starts_with("cd ") {
-                                    let target = trimmed["cd ".len()..].trim();
+                                } else if let Some(rest) = trimmed.strip_prefix("cd ") {
+                                    let target = rest.trim();
                                     let target = if (target.starts_with('\'') && target.ends_with('\''))
                                         || (target.starts_with('"') && target.ends_with('"')) {
                                         if target.len() >= 2 { &target[1..target.len()-1] } else { target }
@@ -496,7 +494,7 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                                 } else {
                                     output_lines.push(format!("❯ {}", text));
 
-                                    let expanded_cmd = if let Some(home) = env::var("HOME").ok() {
+                                    let expanded_cmd = if let Ok(home) = env::var("HOME") {
                                         text.replace("~/", &format!("{}/", home))
                                     } else {
                                         text.clone()
@@ -941,11 +939,10 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
     } else if matches_key(&key, &keys.help) {
         app.dialog = Dialog::Help { active_tab: 0 };
     } else if matches_key(&key, &keys.view) {
-        if let Some(item) = app.get_active_panel().get_selected_item().cloned() {
-            if !item.is_dir {
+        if let Some(item) = app.get_active_panel().get_selected_item().cloned()
+            && !item.is_dir {
                 app.open_viewer(item.path);
             }
-        }
     } else if matches_key(&key, &keys.edit) {
         app.open_editor();
     } else if matches_key(&key, &keys.copy) {
@@ -1044,8 +1041,8 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
             app.status_message = format!("Selected {} items", panel.marked.len());
         }
     } else if matches_key(&key, &keys.select_item) {
-        if let Some(item) = app.get_active_panel().get_selected_item().cloned() {
-            if item.name != ".." {
+        if let Some(item) = app.get_active_panel().get_selected_item().cloned()
+            && item.name != ".." {
                 let panel = app.get_active_panel_mut();
                 if panel.marked.contains(&item.path) {
                     panel.marked.remove(&item.path);
@@ -1054,7 +1051,6 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
                 }
                 panel.select_next();
             }
-        }
     } else if matches_key(&key, &keys.up) {
         if app.tree_mode && app.active_panel == ActivePanel::Left {
             if app.tree_selected > 0 {
@@ -1207,7 +1203,7 @@ fn copy_to_clipboard(text: &str) -> bool {
             }
             return child.wait().map(|s| s.success()).unwrap_or(false);
         }
-        return false;
+        false
     }
 
     #[cfg(not(target_os = "macos"))]

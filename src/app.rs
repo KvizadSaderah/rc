@@ -214,8 +214,8 @@ impl App {
             for entry in entries.flatten() {
                 // Skip symlinks so the tree can never descend into a loop.
                 let is_symlink = entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(false);
-                if let Ok(meta) = entry.metadata() {
-                    if meta.is_dir() && !is_symlink {
+                if let Ok(meta) = entry.metadata()
+                    && meta.is_dir() && !is_symlink {
                         let name = entry.file_name().to_string_lossy().into_owned();
                         if !name.starts_with('.') {
                             let path = entry.path();
@@ -229,9 +229,8 @@ impl App {
                             });
                         }
                     }
-                }
             }
-            subdirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            subdirs.sort_by_key(|a| a.name.to_lowercase());
             self.tree_nodes.extend(subdirs);
         }
     }
@@ -263,8 +262,8 @@ impl App {
             if let Ok(entries) = fs::read_dir(&path) {
                 for entry in entries.flatten() {
                     let is_symlink = entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(false);
-                    if let Ok(meta) = entry.metadata() {
-                        if meta.is_dir() && !is_symlink {
+                    if let Ok(meta) = entry.metadata()
+                        && meta.is_dir() && !is_symlink {
                             let name = entry.file_name().to_string_lossy().into_owned();
                             if !name.starts_with('.') {
                                 let sub_path = entry.path();
@@ -278,10 +277,9 @@ impl App {
                                 });
                             }
                         }
-                    }
                 }
             }
-            subdirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            subdirs.sort_by_key(|a| a.name.to_lowercase());
             
             for (offset, item) in subdirs.into_iter().enumerate() {
                 self.tree_nodes.insert(idx + 1 + offset, item);
@@ -422,8 +420,8 @@ impl App {
         }
 
         // Apply new lines to TerminalOverlay dialog
-        if !new_lines.is_empty() {
-            if let Dialog::TerminalOverlay { output_lines, scroll_offset, .. } = &mut self.dialog {
+        if !new_lines.is_empty()
+            && let Dialog::TerminalOverlay { output_lines, scroll_offset, .. } = &mut self.dialog {
                 output_lines.extend(new_lines);
                 // Cap buffer at 10000 lines to prevent memory explosion
                 const MAX_LINES: usize = 10_000;
@@ -437,7 +435,6 @@ impl App {
                     *scroll_offset = output_lines.len() - display_height;
                 }
             }
-        }
 
         if process_done {
             self.running_process = None;
@@ -512,11 +509,10 @@ impl App {
     }
 
     pub fn get_preview_content(&mut self, path: PathBuf, cols: u16, rows: u16) -> String {
-        if let Some(ref cache) = self.preview_cache {
-            if cache.path == path && cache.width == cols && cache.height == rows {
+        if let Some(ref cache) = self.preview_cache
+            && cache.path == path && cache.width == cols && cache.height == rows {
                 return cache.content.clone();
             }
-        }
         
         let content = self.generate_preview_content(&path, cols, rows);
         self.preview_cache = Some(PreviewCache {
@@ -536,11 +532,10 @@ impl App {
             if let Ok(out) = std::process::Command::new("chafa")
                 .arg(format!("--size={}x{}", cols, rows))
                 .arg(path)
-                .output() {
-                if out.status.success() {
+                .output()
+                && out.status.success() {
                     return String::from_utf8_lossy(&out.stdout).into_owned();
                 }
-            }
             return format!(
                 "\n  [ Image Preview ]\n  File: {}\n\n  Tip: Install 'chafa' (e.g. 'brew install chafa')\n  for beautiful inline terminal image previews!",
                 path.file_name().unwrap_or_default().to_string_lossy()
@@ -549,20 +544,18 @@ impl App {
 
         // 2. Code previews via bat
         let is_text = ["rs", "py", "js", "ts", "json", "toml", "md", "sh", "txt", "cfg", "ini", "yaml", "yml", "xml", "html", "css", "c", "cpp", "h", "go", "java"].contains(&ext.as_str());
-        if is_text {
-            if let Ok(out) = std::process::Command::new("bat")
+        if is_text
+            && let Ok(out) = std::process::Command::new("bat")
                 .arg("--color=always")
                 .arg("--style=plain")
                 .arg(format!("--terminal-width={}", cols))
                 .arg(path)
-                .output() {
-                if out.status.success() {
+                .output()
+                && out.status.success() {
                     let raw_str = String::from_utf8_lossy(&out.stdout);
                     let lines: Vec<&str> = raw_str.lines().take(rows as usize).collect();
                     return lines.join("\n");
                 }
-            }
-        }
 
         read_file_preview(path)
     }
@@ -643,8 +636,8 @@ impl App {
                 self.status_message = format!("Changed directory to {}", self.get_active_panel().path.display());
             }
             return;
-        } else if trimmed.starts_with("cd ") {
-            let target_dir = trimmed["cd ".len()..].trim();
+        } else if let Some(rest) = trimmed.strip_prefix("cd ") {
+            let target_dir = rest.trim();
             // Remove quotes if present
             let target_dir_unquoted = if (target_dir.starts_with('\'') && target_dir.ends_with('\''))
                 || (target_dir.starts_with('"') && target_dir.ends_with('"')) {
@@ -657,7 +650,8 @@ impl App {
                 target_dir
             };
             let path_to_set = {
-                let expanded = if target_dir_unquoted == "~" {
+                
+                if target_dir_unquoted == "~" {
                     env::var("HOME").ok().or_else(|| env::var("USERPROFILE").ok())
                         .map(PathBuf::from)
                 } else if target_dir_unquoted.starts_with("~/") || target_dir_unquoted.starts_with("~\\") {
@@ -670,8 +664,7 @@ impl App {
                     } else {
                         Some(active_dir.join(p))
                     }
-                };
-                expanded
+                }
             };
             if let Some(p) = path_to_set {
                 if p.is_dir() {
@@ -1067,8 +1060,7 @@ pub fn edit_file(path: &Path, editor_bin: &str) -> io::Result<()> {
     execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture, crossterm::cursor::Hide)?;
     
     if !status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
+        return Err(io::Error::other(
             format!("Editor '{}' exited with non-zero status", editor_bin),
         ));
     }
@@ -1104,9 +1096,8 @@ pub fn execute_menu_action(app: &mut App, menu_idx: usize, item_idx: usize, _ter
         1 => { // File Actions
             match item_idx {
                 0 => {
-                    if let Some(item) = app.get_active_panel().get_selected_item().cloned() {
-                        if !item.is_dir { app.open_viewer(item.path); }
-                    }
+                    if let Some(item) = app.get_active_panel().get_selected_item().cloned()
+                        && !item.is_dir { app.open_viewer(item.path); }
                 }
                 1 => {
                     app.open_editor();
@@ -1186,5 +1177,70 @@ pub fn execute_menu_action(app: &mut App, menu_idx: usize, item_idx: usize, _ter
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn app_in(tag: &str) -> (PathBuf, App) {
+        let root = std::env::temp_dir()
+            .join(format!("rc_app_{}_{}", tag, chrono::Utc::now().timestamp_micros()));
+        fs::create_dir_all(root.join("left")).unwrap();
+        fs::create_dir_all(root.join("right")).unwrap();
+        let mut app = App::new();
+        let _ = app.left_panel.set_path(root.join("left"));
+        let _ = app.right_panel.set_path(root.join("right"));
+        app.active_panel = ActivePanel::Left;
+        (root, app)
+    }
+
+    #[test]
+    fn test_toggle_panel() {
+        let (root, mut app) = app_in("toggle");
+        assert_eq!(app.active_panel, ActivePanel::Left);
+        app.toggle_panel();
+        assert_eq!(app.active_panel, ActivePanel::Right);
+        app.toggle_panel();
+        assert_eq!(app.active_panel, ActivePanel::Left);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_sync_panels() {
+        let (root, mut app) = app_in("sync");
+        assert_ne!(app.left_panel.path, app.right_panel.path);
+        app.sync_panels(); // active=Left -> right follows left
+        assert_eq!(app.right_panel.path, app.left_panel.path);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_swap_panels() {
+        let (root, mut app) = app_in("swap");
+        let l = app.left_panel.path.clone();
+        let r = app.right_panel.path.clone();
+        app.swap_panels();
+        assert_eq!(app.left_panel.path, r);
+        assert_eq!(app.right_panel.path, l);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_handle_backspace_goes_to_parent() {
+        let (root, mut app) = app_in("back");
+        let child = app.left_panel.path.clone();
+        app.handle_backspace();
+        assert_eq!(app.left_panel.path, child.parent().unwrap());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_fs_not_busy_initially() {
+        let (root, app) = app_in("busy");
+        assert!(!app.is_fs_busy());
+        let _ = fs::remove_dir_all(&root);
     }
 }
