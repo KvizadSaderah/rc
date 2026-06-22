@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Position, Rect},
     style::{Color, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, BorderType, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, BorderType, Clear, List, ListItem, Paragraph, Wrap},
     Frame,
 };
 
@@ -1561,14 +1561,14 @@ fn draw_tree_panel(f: &mut Frame, area: Rect, app: &mut App, is_active: bool, th
         ListItem::new(line).style(item_style)
     }).collect();
 
-    let mut state = ListState::default();
-    state.select(Some(app.tree_selected));
+    let sel = app.tree_selected;
+    app.tree_state.select(Some(sel));
 
     let list = List::new(list_items)
         .block(block)
         .highlight_style(Style::default());
 
-    f.render_stateful_widget(list, area, &mut state);
+    f.render_stateful_widget(list, area, &mut app.tree_state);
 }
 
 fn draw_beautiful_contents_panel(f: &mut Frame, area: Rect, app: &mut App, is_active: bool, theme: &Theme) {

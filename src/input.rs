@@ -579,6 +579,14 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                                             output_lines.push(format!("Not a directory: {}", p.display()));
                                         }
                                     }
+                                } else if app.running_process.is_some() {
+                                    // Don't clobber a streaming child (would orphan it
+                                    // and leak its reader threads).
+                                    output_lines.push(format!("❯ {}", text));
+                                    output_lines.push(
+                                        "⚠ A command is still running — press Ctrl+C to stop it first."
+                                            .to_string(),
+                                    );
                                 } else {
                                     output_lines.push(format!("❯ {}", text));
 
