@@ -5,6 +5,7 @@ mod panel;
 mod fileops;
 mod watcher;
 mod shell;
+mod layout;
 mod app;
 mod input;
 mod ui;
