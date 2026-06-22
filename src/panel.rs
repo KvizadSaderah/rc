@@ -9,7 +9,7 @@ use crate::types::{FileItem, read_dir};
 // File Panel Core State
 // =============================================================================
 
-#[derive(Copy, Clone, PartialEq, Eq)]
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
 pub enum ActivePanel {
     Left,
     Right,
@@ -63,11 +63,10 @@ impl Panel {
                 if !self.show_hidden && item.name.starts_with('.') {
                     return false;
                 }
-                if let Some(ref f) = self.filter {
-                    if !item.name.to_lowercase().contains(&f.to_lowercase()) {
+                if let Some(ref f) = self.filter
+                    && !item.name.to_lowercase().contains(&f.to_lowercase()) {
                         return false;
                     }
-                }
                 true
             })
             .collect();
@@ -102,11 +101,10 @@ impl Panel {
             self.selected = 0;
             self.scroll_state.select(None);
         } else {
-            if let Some(ref name) = prev_selected_name {
-                if let Some(pos) = self.items.iter().position(|item| &item.name == name) {
+            if let Some(ref name) = prev_selected_name
+                && let Some(pos) = self.items.iter().position(|item| &item.name == name) {
                     self.selected = pos;
                 }
-            }
             if self.selected >= self.items.len() {
                 self.selected = self.items.len() - 1;
             }
@@ -128,8 +126,8 @@ impl Panel {
                 .arg("rev-parse")
                 .arg("--is-inside-work-tree")
                 .current_dir(&self.path)
-                .output() {
-                if out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true" {
+                .output()
+                && out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true" {
                     if let Ok(branch_out) = std::process::Command::new("git")
                         .arg("branch")
                         .arg("--show-current")
@@ -181,7 +179,6 @@ impl Panel {
                         }
                     }
                 }
-            }
         }
     }
 
@@ -243,5 +240,95 @@ impl Panel {
 
     pub fn get_selected_item(&self) -> Option<&FileItem> {
         self.items.get(self.selected)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn fixture(tag: &str) -> (PathBuf, Panel) {
+        let root = std::env::temp_dir()
+            .join(format!("rc_panel_{}_{}", tag, chrono::Utc::now().timestamp_micros()));
+        fs::create_dir_all(root.join("adir")).unwrap();
+        fs::create_dir_all(root.join("bdir")).unwrap();
+        fs::write(root.join("c.txt"), b"x").unwrap();
+        fs::write(root.join("d.txt"), b"y").unwrap();
+        let panel = Panel::new(root.clone(), false, "name".to_string());
+        (root, panel)
+    }
+
+    #[test]
+    fn test_select_wraparound() {
+        let (root, mut p) = fixture("sel");
+        let n = p.items.len();
+        assert!(n >= 4);
+
+        p.selected = 0;
+        p.select_prev(); // wrap to last
+        assert_eq!(p.selected, n - 1);
+        p.select_next(); // wrap to first
+        assert_eq!(p.selected, 0);
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_page_clamps() {
+        let (root, mut p) = fixture("page");
+        let n = p.items.len();
+        p.select_last();
+        assert_eq!(p.selected, n - 1);
+        p.page_down(); // already at end, stays clamped
+        assert_eq!(p.selected, n - 1);
+        p.select_first();
+        p.page_up(); // at start, saturating
+        assert_eq!(p.selected, 0);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_dirs_sorted_before_files() {
+        let (root, p) = fixture("sort");
+        // First entry is "..", then directories, then files.
+        let names: Vec<&str> = p.items.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names[0], "..");
+        let first_file = names.iter().position(|n| n.ends_with(".txt")).unwrap();
+        let last_dir = names.iter().rposition(|n| *n == "adir" || *n == "bdir").unwrap();
+        assert!(last_dir < first_file, "all dirs must precede files");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_filter_narrows_listing() {
+        let (root, mut p) = fixture("filter");
+        p.filter = Some("c.txt".to_string());
+        p.refresh();
+        assert!(p.items.iter().any(|i| i.name == "c.txt"));
+        assert!(!p.items.iter().any(|i| i.name == "d.txt"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_set_path_rejects_file() {
+        let (root, mut p) = fixture("reject");
+        let file = root.join("c.txt");
+        let before = p.path.clone();
+        assert!(p.set_path(file).is_err());
+        assert_eq!(p.path, before, "navigation into a file must not change path");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_set_path_clears_marks_and_filter() {
+        let (root, mut p) = fixture("clear");
+        p.marked.insert(root.join("c.txt"));
+        p.filter = Some("c".to_string());
+        p.set_path(root.join("adir")).unwrap();
+        assert!(p.marked.is_empty());
+        assert!(p.filter.is_none());
+        let _ = fs::remove_dir_all(&root);
     }
 }

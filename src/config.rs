@@ -217,8 +217,8 @@ pub fn load_keymap(config: &Config) -> Keymap {
         _ => Keymap::default_standard(),
     };
 
-    if let Some(path) = get_config_path() {
-        if let Ok(content) = fs::read_to_string(&path) {
+    if let Some(path) = get_config_path()
+        && let Ok(content) = fs::read_to_string(&path) {
             let mut keys_section = false;
             for line in content.lines() {
                 let trimmed = line.trim();
@@ -263,7 +263,6 @@ pub fn load_keymap(config: &Config) -> Keymap {
                 }
             }
         }
-    }
     k
 }
 

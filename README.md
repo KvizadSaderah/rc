@@ -46,9 +46,16 @@ The navigation controls dynamically adapt depending on whether you are using **S
 | **Enter / Right** | **l** | Enter directories / Open file preview viewer |
 | **Backspace / Left** | **h** | Go to the parent directory |
 | **Space** | **Space** | Tag/Mark file for bulk Copy/Move/Delete (moves cursor down automatically) |
+| **Ctrl + A** | **Ctrl + A** | Select / deselect all items in the active panel |
 | **.** | **.** | Toggle show/hide hidden files (starting with `.`) |
 | **Ctrl + P** | **p** | Toggle **Quick View Mode** (active folder live preview inside the inactive pane!) |
+| **Ctrl + T** | **Ctrl + T** | Toggle **Tree View** in the left panel |
 | **Ctrl + S** | **o** | Open **Settings/Configuration** overlay |
+| **Ctrl + O** | **Ctrl + O** | Open **Terminal Overlay** (streaming command output) |
+| **Ctrl + B** | **Ctrl + B** | Open **Bookmarks**; **Ctrl + D** bookmarks the current folder |
+| **Ctrl + U** | **Ctrl + U** | Swap the left and right panel directories |
+| **=** | **=** | Sync the inactive panel to the active panel's directory |
+| **Ctrl + Y** | **Ctrl + Y** | Copy the active panel path to the clipboard |
 | **:** | **:** | Open **Command Line prompt** to execute shell commands, `cd`, or quit (`q`, `exit`) |
 | **/** | **/** | Open **Interactive Filter prompt** to filter active list in real-time |
 | **~** | **~** | Jump directly to your Home (`~`) folder |
@@ -59,13 +66,23 @@ The navigation controls dynamically adapt depending on whether you are using **S
 ### Function Keys (Standard)
 
 - **F1**: Help manual / documentation popup
+- **F2 / Ctrl + I**: File/folder **Properties** (size, permissions, owner, timestamps)
 - **F3 / v**: Full screen file text/hex viewer
 - **F4 / e**: Edit file (suspends TUI, opens your default `$EDITOR` or `nano`)
-- **F5 / c**: Copy selected file/directory to target panel location
-- **F6 / m**: Move/Rename selected item
+- **F5 / c**: Copy selected/tagged file(s) or directory to the other panel
+- **F6 / m**: Move/Rename selected/tagged item(s)
 - **F7 / n**: Create a new directory
-- **F8 / d**: Delete selected item (recursive) with confirmation
+- **F8 / d**: Delete selected/tagged item(s) (recursive) with confirmation
 - **F9**: Open Interactive Dropdown Menu Bar (Left, File, Command, Options, Right)
+
+> **Background operations:** Copy, Move and Delete run on a background thread
+> with a live progress bar (current item, byte/file counts, percentage). The UI
+> never freezes on large files, deep trees, or slow/network mounts. Press
+> **Esc** or **c** to cancel an operation in progress. Per-item errors are
+> collected and reported at the end instead of aborting on the first failure.
+
+> **Live updates:** Panels refresh automatically when files change on disk
+> (via a filesystem watcher), so external changes appear without pressing **R**.
 
 ---
 

@@ -317,11 +317,10 @@ impl InputField {
 
     pub fn delete(&mut self) {
         let char_len = self.text.chars().count();
-        if self.cursor_position < char_len {
-            if let Some(byte_idx) = self.text.char_indices().map(|(i, _)| i).nth(self.cursor_position) {
+        if self.cursor_position < char_len
+            && let Some(byte_idx) = self.text.char_indices().map(|(i, _)| i).nth(self.cursor_position) {
                 self.text.remove(byte_idx);
             }
-        }
     }
 
     pub fn move_left(&mut self) {
