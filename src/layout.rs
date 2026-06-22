@@ -264,16 +264,17 @@ impl Node {
         } = self
         {
             let (a, b) = split_rect(area, *dir, *ratio);
+            // The shared seam sits on the overlapped column/row.
             let seam = match dir {
                 Dir::Horizontal => Rect {
-                    x: b.x.saturating_sub(1),
+                    x: a.x + a.width - 1,
                     y: area.y,
                     width: 1,
                     height: area.height,
                 },
                 Dir::Vertical => Rect {
                     x: area.x,
-                    y: b.y.saturating_sub(1),
+                    y: a.y + a.height - 1,
                     width: area.width,
                     height: 1,
                 },
@@ -296,28 +297,30 @@ impl Node {
 
 fn split_rect(area: Rect, dir: Dir, ratio: f32) -> (Rect, Rect) {
     let r = ratio.clamp(MIN_RATIO, MAX_RATIO);
+    // The second child overlaps the first by one cell at the seam, so the two
+    // bordered panels share a single divider line instead of drawing ║║ / ══.
     match dir {
         Dir::Horizontal => {
             let w = ((area.width as f32) * r).round() as u16;
-            let w = w.clamp(1, area.width.saturating_sub(1).max(1));
+            let w = w.clamp(2, area.width.saturating_sub(1).max(2));
             let a = Rect { x: area.x, y: area.y, width: w, height: area.height };
             let b = Rect {
-                x: area.x + w,
+                x: area.x + w - 1,
                 y: area.y,
-                width: area.width.saturating_sub(w),
+                width: area.width - (w - 1),
                 height: area.height,
             };
             (a, b)
         }
         Dir::Vertical => {
             let h = ((area.height as f32) * r).round() as u16;
-            let h = h.clamp(1, area.height.saturating_sub(1).max(1));
+            let h = h.clamp(2, area.height.saturating_sub(1).max(2));
             let a = Rect { x: area.x, y: area.y, width: area.width, height: h };
             let b = Rect {
                 x: area.x,
-                y: area.y + h,
+                y: area.y + h - 1,
                 width: area.width,
-                height: area.height.saturating_sub(h),
+                height: area.height - (h - 1),
             };
             (a, b)
         }
@@ -372,13 +375,14 @@ mod tests {
         let area = Rect::new(0, 0, 100, 40);
         let rects = root.rects(area);
         assert_eq!(rects.len(), 2);
-        // side by side, together span the full width, full height each
+        // Side by side, full height each; second overlaps the seam by one cell
+        // so their shared border renders as a single line.
         let (_, a) = rects[0];
         let (_, b) = rects[1];
         assert_eq!(a.height, 40);
         assert_eq!(b.height, 40);
-        assert_eq!(a.width + b.width, 100);
-        assert_eq!(b.x, a.x + a.width);
+        assert_eq!(b.x, a.x + a.width - 1);
+        assert_eq!(b.x + b.width, a.x + 100); // together still span the full width
     }
 
     #[test]
