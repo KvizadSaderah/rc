@@ -18,6 +18,7 @@ use crate::panel::*;
 use crate::types::*;
 
 use ratatui::layout::Rect;
+use ratatui::widgets::ListState;
 
 // =============================================================================
 // App Controller State
@@ -44,6 +45,9 @@ pub struct App {
     pub tree_mode: bool,
     pub tree_nodes: Vec<TreeNode>,
     pub tree_selected: usize,
+    /// Persistent list state for the tree pane so its scroll offset survives
+    /// across frames (needed for correct mouse hit-testing).
+    pub tree_state: ListState,
     pub preview_cache: Option<PreviewCache>,
     pub running_process: Option<RunningProcess>,
     pub preview_scroll_offset: usize,
@@ -85,6 +89,7 @@ impl App {
             tree_mode: false,
             tree_nodes: Vec::new(),
             tree_selected: 0,
+            tree_state: ListState::default(),
             preview_cache: None,
             running_process: None,
             preview_scroll_offset: 0,
@@ -354,7 +359,8 @@ impl App {
         if row <= rect.y {
             return;
         }
-        let idx = (row - rect.y - 1) as usize;
+        // Account for the tree pane's scroll offset (long trees scroll).
+        let idx = self.tree_state.offset() + (row - rect.y - 1) as usize;
         if idx < self.tree_nodes.len() {
             let was_selected = self.tree_selected == idx;
             self.tree_selected = idx;
