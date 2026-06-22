@@ -21,9 +21,18 @@ use crate::ui::{ui, centered_rect};
 // =============================================================================
 
 pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> io::Result<()> {
+    let mut tick: u32 = 0;
     loop {
         // Drain output from any running background process
         app.drain_process_output();
+
+        // Auto-refresh panels every ~2s to pick up external filesystem changes
+        tick = tick.wrapping_add(1);
+        if tick % 40 == 0 {
+            if matches!(app.dialog, Dialog::None) {
+                app.refresh_panels();
+            }
+        }
 
         terminal.draw(|f| ui(f, &mut app))?;
 
