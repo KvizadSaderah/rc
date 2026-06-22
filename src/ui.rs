@@ -703,15 +703,19 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 0 => vec![
                     Line::from(""),
                     head("Panel Navigation"),
-                    row("Tab",           "Switch active panel (Left ↔ Right)"),
+                    row("Tab",           "Cycle focus across panes"),
                     row("↑ / k",         "Move cursor up"),
                     row("↓ / j",         "Move cursor down"),
                     row("Enter",         "Open directory or file viewer"),
                     row("Backspace",     "Go to parent directory"),
                     row("~",            "Jump to Home directory"),
-                    row("g / Home",      "Jump to top of list"),
-                    row("G / End",       "Jump to bottom of list"),
-                    row("PgUp / PgDn",   "Scroll page up / down"),
+                    row("g / G",         "Jump to top / bottom of list"),
+                    Line::from(""),
+                    head("Panes (Tiling)"),
+                    row("|",             "Split focused pane left / right"),
+                    row("-",             "Split focused pane top / bottom"),
+                    row("Ctrl+W",        "Close focused pane (not the last)"),
+                    row("Ctrl+←↑↓→",     "Resize the focused pane"),
                     Line::from(""),
                     head("Selection & Marking"),
                     row("Space",         "Tag/mark file for bulk operation"),
@@ -789,9 +793,19 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                         Style::default().fg(Color::Rgb(203, 213, 225))
                     )),
                     Line::from(""),
+                    head("Mouse"),
+                    Line::from(Span::styled(
+                        "  Click focuses a pane & selects; click again opens.",
+                        Style::default().fg(Color::Rgb(203, 213, 225))
+                    )),
+                    Line::from(Span::styled(
+                        "  Wheel scrolls; drag a seam to resize; header = menu.",
+                        Style::default().fg(Color::Rgb(203, 213, 225))
+                    )),
+                    Line::from(""),
                     head("Config File"),
                     Line::from(Span::styled(
-                        "  ~/.config/rc/config  (auto-saved on exit)",
+                        "  ~/.config/rust-commander/config.ini",
                         Style::default().fg(Color::Rgb(203, 213, 225))
                     )),
                 ],

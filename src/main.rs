@@ -57,6 +57,12 @@ fn print_help() {
          \x1b[36m  Ctrl+T\x1b[0m  Tree view   \x1b[36mCtrl+P\x1b[0m  Preview  \x1b[36mCtrl+D\x1b[0m  Bookmark dir\n\
          \x1b[36m  Ctrl+U\x1b[0m  Swap panels \x1b[36m=\x1b[0m       Sync     \x1b[36m~\x1b[0m       Home\n\
          \x1b[36m  Ctrl+Y\x1b[0m  Copy current panel path to clipboard\n\
+         \n\
+         \x1b[1mPANES (tiling):\x1b[0m\n\
+         \x1b[36m  |\x1b[0m  Split left/right   \x1b[36m-\x1b[0m  Split top/bottom   \x1b[36mCtrl+W\x1b[0m  Close pane\n\
+         \x1b[36m  Tab\x1b[0m  Cycle focus       \x1b[36mCtrl+←↑↓→\x1b[0m  Resize focused pane\n\
+         \x1b[2m  Mouse: click focuses/selects, click again opens, wheel scrolls,\x1b[0m\n\
+         \x1b[2m         drag a seam to resize, click header for the menu.\x1b[0m\n\
          \x1b[2m  Copy/Move/Delete run in the background — Esc or c cancels.\x1b[0m\n\
          \n\
          \x1b[1mCONFIG:\x1b[0m  ~/.config/rust-commander/config.ini\n\
