@@ -9,7 +9,7 @@ use ratatui::{
 };
 
 use crate::app::App;
-use crate::panel::{ActivePanel, Panel};
+use crate::panel::Panel;
 use crate::theme::Theme;
 use crate::types::*;
 
@@ -86,25 +86,35 @@ pub fn ui(f: &mut Frame, app: &mut App) {
 
     let border_type = get_border_type(&app.config.border_type);
 
+    let workspace = chunks[1];
     if app.tree_mode {
-        draw_tree_panel(f, panels_layout[0], app, app.active_panel == ActivePanel::Left, &theme);
-        draw_beautiful_contents_panel(f, panels_layout[1], app, app.active_panel == ActivePanel::Right, &theme);
+        // Tree mode is a fixed two-pane takeover: tree pane + content pane.
+        let tree_pane = app.root.first_leaf();
+        let partner = app.partner;
+        app.leaf_rects = vec![(tree_pane, panels_layout[0]), (partner, panels_layout[1])];
+        let tree_active = app.focus == tree_pane;
+        let content_active = app.focus == partner;
+        draw_tree_panel(f, panels_layout[0], app, tree_active, &theme);
+        draw_beautiful_contents_panel(f, panels_layout[1], app, content_active, &theme);
     } else if app.preview_mode {
-        match app.active_panel {
-            ActivePanel::Left => {
-                draw_panel(f, panels_layout[0], &mut app.left_panel, true, &theme, border_type);
-                let selected_item = app.left_panel.get_selected_item().cloned();
-                draw_live_preview(f, panels_layout[1], selected_item, app);
-            }
-            ActivePanel::Right => {
-                let selected_item = app.right_panel.get_selected_item().cloned();
-                draw_live_preview(f, panels_layout[0], selected_item, app);
-                draw_panel(f, panels_layout[1], &mut app.right_panel, true, &theme, border_type);
+        // Quick-view takeover: focused pane on the left, live preview on the right.
+        let focus = app.focus;
+        app.leaf_rects = vec![(focus, panels_layout[0])];
+        let selected_item = app.get_active_panel().get_selected_item().cloned();
+        if let Some(p) = app.panels[focus].as_mut() {
+            draw_panel(f, panels_layout[0], p, true, &theme, border_type);
+        }
+        draw_live_preview(f, panels_layout[1], selected_item, app);
+    } else {
+        // Normal mode: render the tiling split tree.
+        let focus = app.focus;
+        let rects = app.root.rects(workspace);
+        app.leaf_rects = rects.clone();
+        for (id, rect) in rects {
+            if let Some(p) = app.panels[id].as_mut() {
+                draw_panel(f, rect, p, id == focus, &theme, border_type);
             }
         }
-    } else {
-        draw_panel(f, panels_layout[0], &mut app.left_panel, app.active_panel == ActivePanel::Left, &theme, border_type);
-        draw_panel(f, panels_layout[1], &mut app.right_panel, app.active_panel == ActivePanel::Right, &theme, border_type);
     }
 
     // 3. Bottom Status Line
@@ -1484,9 +1494,11 @@ fn draw_beautiful_contents_panel(f: &mut Frame, area: Rect, app: &mut App, is_ac
         .split(area);
 
     let border_type = get_border_type(&app.config.border_type);
-    draw_panel(f, chunks[0], &mut app.right_panel, is_active, theme, border_type);
-
-    let selected_item = app.right_panel.get_selected_item().cloned();
+    let partner = app.partner;
+    let selected_item = app.panel(partner).get_selected_item().cloned();
+    if let Some(p) = app.panels[partner].as_mut() {
+        draw_panel(f, chunks[0], p, is_active, theme, border_type);
+    }
     draw_live_preview(f, chunks[1], selected_item, app);
 }
 
