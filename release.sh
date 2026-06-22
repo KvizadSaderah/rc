@@ -133,14 +133,14 @@ if [[ -z "$RELEASE_TITLE" ]]; then
 fi
 
 echo ""
-echo -e "  ${DIM}Release notes (markdown supported).${RESET}"
-echo -e "  ${DIM}Leave blank to auto-generate from git log.${RESET}"
-echo -e "  ${DIM}Or enter notes line by line, finish with a single dot '.':${RESET}"
+echo -e "  ${DIM}Release notes (Enter to auto-generate from git log,${RESET}"
+echo -e "  ${DIM}or type notes line by line and finish with '.'):${RESET}"
 echo ""
 
 NOTES_LINES=()
 while IFS= read -r line; do
     [[ "$line" == "." ]] && break
+    [[ -z "$line" ]] && break
     NOTES_LINES+=("$line")
 done
 
