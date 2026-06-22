@@ -698,15 +698,23 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
 
                     match key.code {
                         KeyCode::Esc => {
+                            // Don't silently discard unsaved work: require an
+                            // explicit Ctrl+Q (discard) or Ctrl+S (save) first.
                             if *modified {
-                                app.status_message = "Editor closed (unsaved changes discarded)".to_string();
+                                app.status_message =
+                                    "Unsaved changes — Ctrl+S to save, Ctrl+Q to discard".to_string();
+                            } else {
+                                close_editor = true;
                             }
-                            close_editor = true;
                         }
                         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             save_file = true;
                         }
                         KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            // Explicit discard-and-close.
+                            if *modified {
+                                app.status_message = "Discarded unsaved changes".to_string();
+                            }
                             close_editor = true;
                         }
                         KeyCode::Up => {

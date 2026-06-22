@@ -1071,8 +1071,8 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 .title_bottom(Line::from(vec![
                     Span::styled("  Ctrl+S", Style::default().fg(Color::Rgb(0, 210, 220)).bold()),
                     Span::styled(":save ", Style::default().fg(Color::DarkGray)),
-                    Span::styled("Esc/Ctrl+Q", Style::default().fg(Color::Rgb(0, 210, 220)).bold()),
-                    Span::styled(":close ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("Ctrl+Q", Style::default().fg(Color::Rgb(0, 210, 220)).bold()),
+                    Span::styled(":discard ", Style::default().fg(Color::DarkGray)),
                     Span::styled("Tab", Style::default().fg(Color::Rgb(0, 210, 220)).bold()),
                     Span::styled(":indent ", Style::default().fg(Color::DarkGray)),
                     Span::styled(
