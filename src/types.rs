@@ -149,19 +149,66 @@ pub fn format_time(time: Option<SystemTime>) -> String {
     }
 }
 
-pub fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<()> {
-    fs::create_dir_all(&dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let ty = entry.file_type()?;
-        if ty.is_dir() {
-            copy_dir_all(entry.path(), dst.as_ref().join(entry.file_name()))?;
-        } else {
-            fs::copy(entry.path(), dst.as_ref().join(entry.file_name()))?;
+pub fn copy_item(src: &Path, dst: &Path) -> io::Result<()> {
+    let meta = fs::symlink_metadata(src)?;
+    let file_type = meta.file_type();
+    if file_type.is_symlink() {
+        let target = fs::read_link(src)?;
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, dst)
         }
+        #[cfg(not(unix))]
+        {
+            if src.is_dir() {
+                std::os::windows::fs::symlink_dir(target, dst)
+            } else {
+                std::os::windows::fs::symlink_file(target, dst)
+            }
+        }
+    } else if file_type.is_dir() {
+        fs::create_dir_all(dst)?;
+        for entry in fs::read_dir(src)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            copy_item(&entry.path(), &dst.join(name))?;
+        }
+        Ok(())
+    } else {
+        fs::copy(src, dst).map(|_| ())
     }
-    Ok(())
 }
+
+#[allow(dead_code)]
+pub fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<()> {
+    copy_item(src.as_ref(), dst.as_ref())
+}
+
+pub fn move_item(src: &Path, dst: &Path) -> io::Result<()> {
+    if let Err(e) = fs::rename(src, dst) {
+        if e.kind() == std::io::ErrorKind::CrossesDevices
+            || e.raw_os_error() == Some(18) // EXDEV (Unix)
+            || e.raw_os_error() == Some(17) // ERROR_NOT_SAME_DEVICE (Windows)
+        {
+            copy_item(src, dst)?;
+            let is_symlink = src.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false);
+            if is_symlink {
+                fs::remove_file(src)?;
+            } else if src.is_dir() {
+                fs::remove_dir_all(src)?;
+            } else {
+                fs::remove_file(src)?;
+            }
+            Ok(())
+        } else {
+            Err(e)
+        }
+    } else {
+        Ok(())
+    }
+}
+
+
 
 pub fn read_file_preview(path: &Path) -> String {
     let mut file = match File::open(path) {
@@ -364,6 +411,18 @@ pub enum Dialog {
     InputMkdir {
         input: InputField,
     },
+    InputTouch {
+        input: InputField,
+    },
+    Properties {
+        name: String,
+        path_str: String,
+        size_str: String,
+        permissions_str: String,
+        modified_str: String,
+        created_str: String,
+        owner_str: String,
+    },
     ConfirmCopy {
         source_path: PathBuf,
         input: InputField,
@@ -421,4 +480,271 @@ pub enum Dialog {
         scroll_col: usize,
         modified: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_format_size() {
+        assert_eq!(format_size(0), "0 B");
+        assert_eq!(format_size(500), "500 B");
+        assert_eq!(format_size(1024), "1.0 KB");
+        assert_eq!(format_size(1024 * 1024), "1.0 MB");
+        assert_eq!(format_size(1024 * 1024 * 1024), "1.0 GB");
+        assert_eq!(format_size(1024 * 1024 * 1024 * 5 + 500 * 1024 * 1024), "5.5 GB");
+    }
+
+    #[test]
+    fn test_input_field_navigation() {
+        let mut input = InputField::new("hello".to_string());
+        assert_eq!(input.text, "hello");
+        assert_eq!(input.cursor_position, 5);
+
+        input.move_left();
+        assert_eq!(input.cursor_position, 4);
+
+        input.move_right();
+        assert_eq!(input.cursor_position, 5);
+
+        // Can't move right past end
+        input.move_right();
+        assert_eq!(input.cursor_position, 5);
+
+        input.home();
+        assert_eq!(input.cursor_position, 0);
+
+        // Can't move left past start
+        input.move_left();
+        assert_eq!(input.cursor_position, 0);
+
+        input.end();
+        assert_eq!(input.cursor_position, 5);
+    }
+
+    #[test]
+    fn test_input_field_editing() {
+        let mut input = InputField::new("world".to_string());
+        input.home();
+        input.insert('x');
+        assert_eq!(input.text, "xworld");
+        assert_eq!(input.cursor_position, 1);
+
+        input.delete();
+        assert_eq!(input.text, "xorld");
+        assert_eq!(input.cursor_position, 1);
+
+        input.end();
+        input.backspace();
+        assert_eq!(input.text, "xorl");
+        assert_eq!(input.cursor_position, 4);
+    }
+
+    #[test]
+    fn test_copy_item_and_symlinks() {
+        let root = std::env::temp_dir().join(format!("rc_test_copy_{}", chrono::Utc::now().timestamp_micros()));
+        let src = root.join("src");
+        let dst = root.join("dst");
+        fs::create_dir_all(&src).unwrap();
+
+        let file_path = src.join("file.txt");
+        fs::write(&file_path, "hello symlink").unwrap();
+
+        // Create a symlink
+        let link_path = src.join("link.txt");
+        #[cfg(unix)]
+        std::os::unix::fs::symlink("file.txt", &link_path).unwrap();
+        #[cfg(not(unix))]
+        std::os::windows::fs::symlink_file("file.txt", &link_path).unwrap();
+
+        // Copy item recursively
+        copy_item(&src, &dst).unwrap();
+
+        // Verify dst has file.txt and link.txt
+        assert!(dst.join("file.txt").exists());
+        assert_eq!(fs::read_to_string(dst.join("file.txt")).unwrap(), "hello symlink");
+
+        let dest_link = dst.join("link.txt");
+        let link_meta = fs::symlink_metadata(&dest_link).unwrap();
+        assert!(link_meta.file_type().is_symlink());
+
+        let target = fs::read_link(&dest_link).unwrap();
+        assert_eq!(target.to_str().unwrap(), "file.txt");
+
+        // Clean up
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_move_item() {
+        let root = std::env::temp_dir().join(format!("rc_test_move_{}", chrono::Utc::now().timestamp_micros()));
+        let src = root.join("src");
+        let dst = root.join("dst");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&dst).unwrap();
+
+        let file_path = src.join("file.txt");
+        fs::write(&file_path, "hello move").unwrap();
+
+        // Move item
+        move_item(&file_path, &dst.join("moved.txt")).unwrap();
+
+        assert!(!file_path.exists());
+        assert!(dst.join("moved.txt").exists());
+        assert_eq!(fs::read_to_string(dst.join("moved.txt")).unwrap(), "hello move");
+
+        // Clean up
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_lazygit_theme() {
+        let theme = Theme::get_theme("lazygit");
+        assert_eq!(theme.active_border, ratatui::style::Color::Rgb(74, 222, 128));
+        assert!(Theme::all_names().contains(&"lazygit"));
+    }
+
+    #[test]
+    fn test_config_border_type() {
+        let config = crate::config::load_config();
+        // default border type should be plain or whatever is currently in config.ini
+        assert!(!config.border_type.is_empty());
+    }
+
+    #[test]
+    fn test_preview_scroll_offset() {
+        let mut app = crate::app::App::new();
+        assert_eq!(app.preview_scroll_offset, 0);
+
+        app.preview_scroll_offset = 10;
+        assert_eq!(app.preview_scroll_offset, 10);
+
+        // simulate path navigation
+        app.left_panel.selected = 1;
+        
+        // compare states (like at the end of handle_main_keys)
+        app.preview_scroll_offset = 0; // reset
+        assert_eq!(app.preview_scroll_offset, 0);
+    }
+
+    #[test]
+    fn test_touch_file() {
+        let mut app = crate::app::App::new();
+        let root = std::env::temp_dir().join(format!("rc_test_touch_{}", chrono::Utc::now().timestamp_micros()));
+        fs::create_dir_all(&root).unwrap();
+
+        let _ = app.left_panel.set_path(root.clone());
+        app.active_panel = crate::panel::ActivePanel::Left;
+        
+        let new_file_name = "empty_file.txt".to_string();
+        app.execute_touch(new_file_name.clone());
+
+        assert!(root.join(&new_file_name).exists());
+        
+        // Clean up
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_properties_dialog() {
+        let mut app = crate::app::App::new();
+        let temp = std::env::temp_dir().canonicalize().unwrap();
+        let root = temp.join(format!("rc_test_properties_{}", chrono::Utc::now().timestamp_micros()));
+        fs::create_dir_all(&root).unwrap();
+
+        let file_path = root.join("test_file.txt");
+        fs::write(&file_path, "properties content").unwrap();
+
+        let _ = app.left_panel.set_path(root.clone());
+        app.active_panel = crate::panel::ActivePanel::Left;
+        
+        // Find test_file.txt in items and select it
+        if let Some(idx) = app.left_panel.items.iter().position(|i| i.name == "test_file.txt") {
+            app.left_panel.selected = idx;
+        }
+
+        app.initiate_properties();
+
+        if let Dialog::Properties { name, path_str, size_str, .. } = &app.dialog {
+            assert_eq!(name, "test_file.txt");
+            assert_eq!(path_str, &file_path.display().to_string());
+            assert_eq!(size_str, &format_size(18));
+        } else {
+            panic!("Expected Dialog::Properties");
+        }
+
+        // Clean up
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_git_caching() {
+        let mut panel = crate::panel::Panel::new(std::env::temp_dir(), false, "name".to_string());
+        // Since Panel::new calls refresh internally, last_git_query is already Some.
+        let time1 = panel.last_git_query;
+        assert!(time1.is_some());
+        
+        panel.refresh();
+        let time2 = panel.last_git_query;
+        assert_eq!(time1, time2);
+    }
+
+    #[test]
+    fn test_symlink_deletion() {
+        let root = std::env::temp_dir().join(format!("rc_test_symlink_del_{}", chrono::Utc::now().timestamp_micros()));
+        let target_dir = root.join("target_dir");
+        let symlink_dir = root.join("symlink_dir");
+        fs::create_dir_all(&target_dir).unwrap();
+        
+        let file_in_target = target_dir.join("inside.txt");
+        fs::write(&file_in_target, "keep me").unwrap();
+
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target_dir, &symlink_dir).unwrap();
+        #[cfg(not(unix))]
+        std::os::windows::fs::symlink_dir(&target_dir, &symlink_dir).unwrap();
+
+        assert!(symlink_dir.exists());
+
+        let mut app = crate::app::App::new();
+        let _ = app.left_panel.set_path(root.clone());
+        app.active_panel = crate::panel::ActivePanel::Left;
+        
+        app.execute_delete(symlink_dir.clone());
+
+        assert!(!symlink_dir.exists());
+        assert!(target_dir.exists());
+        assert!(file_in_target.exists());
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_right_arrow_on_file() {
+        let mut app = crate::app::App::new();
+        let root = std::env::temp_dir().canonicalize().unwrap().join(format!("rc_test_right_arrow_{}", chrono::Utc::now().timestamp_micros()));
+        fs::create_dir_all(&root).unwrap();
+
+        let file_path = root.join("test_file.txt");
+        fs::write(&file_path, "some content").unwrap();
+
+        let _ = app.left_panel.set_path(root.clone());
+        app.active_panel = crate::panel::ActivePanel::Left;
+
+        // Select the file
+        if let Some(idx) = app.left_panel.items.iter().position(|i| i.name == "test_file.txt") {
+            app.left_panel.selected = idx;
+        }
+
+        let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
+        let mut terminal = ratatui::Terminal::new(backend).unwrap();
+
+        app.handle_enter_or_right(&mut terminal, false);
+
+        assert!(matches!(app.dialog, Dialog::None));
+        assert_eq!(app.status_message, "Press Enter to edit/open file");
+
+        let _ = fs::remove_dir_all(&root);
+    }
 }

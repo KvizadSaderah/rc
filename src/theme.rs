@@ -18,7 +18,7 @@ pub struct Theme {
 
 impl Theme {
     pub fn all_names() -> &'static [&'static str] {
-        &["eve", "monokai", "catppuccin", "dracula", "nord", "solarized", "gruvbox", "tokyo-night"]
+        &["eve", "monokai", "catppuccin", "dracula", "nord", "solarized", "gruvbox", "tokyo-night", "lazygit"]
     }
 
     pub fn get_theme(name: &str) -> Self {
@@ -120,6 +120,20 @@ impl Theme {
                 file_fg:               Color::Rgb(169, 177, 214),
                 text_highlight:        Color::Rgb(224, 175, 104),
                 accent:                Color::Rgb(187, 154, 247),
+            },
+            "lazygit" => Self {
+                active_border:         Color::Rgb(74, 222, 128),   // green (vibrant green, like lazygit active border)
+                inactive_border:       Color::Rgb(71, 85, 105),   // muted slate gray (like lazygit inactive borders)
+                active_selection_bg:   Color::Rgb(124, 58, 237),  // violet/purple highlight (like the selection color in user screenshot)
+                inactive_selection_bg: Color::Rgb(30, 41, 59),    // dark blue-gray
+                header_bg:             Color::Rgb(15, 23, 42),     // slate-900 dark background
+                status_bg:             Color::Rgb(15, 23, 42),
+                folder_fg:             Color::Rgb(56, 189, 248),   // sky-blue folders
+                symlink_fg:            Color::Rgb(244, 63, 94),    // rose symlinks
+                executable_fg:         Color::Rgb(74, 222, 128),   // green executables
+                file_fg:               Color::Rgb(226, 232, 240),  // off-white files
+                text_highlight:        Color::Rgb(250, 204, 21),   // yellow text highlights
+                accent:                Color::Rgb(74, 222, 128),   // green accent
             },
             _ => Self { // "eve" — Eve Online deep space
                 active_border:         Color::Rgb(0, 210, 220),

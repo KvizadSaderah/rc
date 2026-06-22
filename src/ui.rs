@@ -4,7 +4,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Direction, Layout, Position, Rect},
     style::{Color, Style, Stylize},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Wrap},
+    widgets::{Block, Borders, BorderType, Clear, List, ListItem, ListState, Paragraph, Wrap},
     Frame,
 };
 
@@ -12,6 +12,16 @@ use crate::app::App;
 use crate::panel::{ActivePanel, Panel};
 use crate::theme::Theme;
 use crate::types::*;
+
+pub fn get_border_type(border_str: &str) -> BorderType {
+    match border_str.to_lowercase().as_str() {
+        "rounded" => BorderType::Rounded,
+        "thick" => BorderType::Thick,
+        "double" => BorderType::Double,
+        _ => BorderType::Plain,
+    }
+}
+
 
 // =============================================================================
 // UI Drawing Layouts & Formatting
@@ -74,25 +84,27 @@ pub fn ui(f: &mut Frame, app: &mut App) {
     ];
     f.render_widget(Paragraph::new(Line::from(menu_spans)).bg(theme.header_bg), header_rect);
 
+    let border_type = get_border_type(&app.config.border_type);
+
     if app.tree_mode {
         draw_tree_panel(f, panels_layout[0], app, app.active_panel == ActivePanel::Left, &theme);
         draw_beautiful_contents_panel(f, panels_layout[1], app, app.active_panel == ActivePanel::Right, &theme);
     } else if app.preview_mode {
         match app.active_panel {
             ActivePanel::Left => {
-                draw_panel(f, panels_layout[0], &mut app.left_panel, true, &theme);
+                draw_panel(f, panels_layout[0], &mut app.left_panel, true, &theme, border_type);
                 let selected_item = app.left_panel.get_selected_item().cloned();
                 draw_live_preview(f, panels_layout[1], selected_item, app);
             }
             ActivePanel::Right => {
                 let selected_item = app.right_panel.get_selected_item().cloned();
                 draw_live_preview(f, panels_layout[0], selected_item, app);
-                draw_panel(f, panels_layout[1], &mut app.right_panel, true, &theme);
+                draw_panel(f, panels_layout[1], &mut app.right_panel, true, &theme, border_type);
             }
         }
     } else {
-        draw_panel(f, panels_layout[0], &mut app.left_panel, app.active_panel == ActivePanel::Left, &theme);
-        draw_panel(f, panels_layout[1], &mut app.right_panel, app.active_panel == ActivePanel::Right, &theme);
+        draw_panel(f, panels_layout[0], &mut app.left_panel, app.active_panel == ActivePanel::Left, &theme, border_type);
+        draw_panel(f, panels_layout[1], &mut app.right_panel, app.active_panel == ActivePanel::Right, &theme, border_type);
     }
 
     // 3. Bottom Status Line
@@ -187,6 +199,62 @@ pub fn ui(f: &mut Frame, app: &mut App) {
 
     match &app.dialog {
         Dialog::None | Dialog::CommandLine { .. } | Dialog::Filter { .. } => {}
+        Dialog::Properties {
+            name,
+            path_str,
+            size_str,
+            permissions_str,
+            modified_str,
+            created_str,
+            owner_str,
+        } => {
+            let area = centered_rect_min(65, 45, 55, 13, f.area());
+            f.render_widget(Clear, area);
+            let block = Block::default()
+                .title(" File / Folder Properties ")
+                .title_alignment(Alignment::Center)
+                .borders(Borders::ALL)
+                .border_type(border_type)
+                .border_style(Style::default().fg(Color::Rgb(139, 92, 246))) // Violet / purple
+                .bg(Color::Rgb(17, 24, 39));
+            
+            let text = vec![
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled(" Name:       ", Style::default().fg(Color::Cyan).bold()),
+                    Span::styled(name, Style::default().fg(Color::White)),
+                ]),
+                Line::from(vec![
+                    Span::styled(" Path:       ", Style::default().fg(Color::Cyan).bold()),
+                    Span::styled(path_str, Style::default().fg(Color::Rgb(156, 163, 175))),
+                ]),
+                Line::from(vec![
+                    Span::styled(" Size:       ", Style::default().fg(Color::Cyan).bold()),
+                    Span::styled(size_str, Style::default().fg(Color::Green)),
+                ]),
+                Line::from(vec![
+                    Span::styled(" Mode:       ", Style::default().fg(Color::Cyan).bold()),
+                    Span::styled(permissions_str, Style::default().fg(Color::Yellow)),
+                ]),
+                Line::from(vec![
+                    Span::styled(" Owner:      ", Style::default().fg(Color::Cyan).bold()),
+                    Span::styled(owner_str, Style::default().fg(Color::White)),
+                ]),
+                Line::from(vec![
+                    Span::styled(" Created:    ", Style::default().fg(Color::Cyan).bold()),
+                    Span::styled(created_str, Style::default().fg(Color::White)),
+                ]),
+                Line::from(vec![
+                    Span::styled(" Modified:   ", Style::default().fg(Color::Cyan).bold()),
+                    Span::styled(modified_str, Style::default().fg(Color::White)),
+                ]),
+                Line::from(""),
+                Line::from("Press [Esc], [Enter], or [Space] to close.").alignment(Alignment::Center),
+            ];
+            
+            let para = Paragraph::new(text).block(block);
+            f.render_widget(para, area);
+        }
         Dialog::Menu { active_menu, active_item } => {
             if let Some(item_idx) = active_item {
                 draw_menu_dropdown(f, *active_menu, *item_idx);
@@ -199,6 +267,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 .title(" Confirm Delete ")
                 .title_alignment(Alignment::Center)
                 .borders(Borders::ALL)
+                .border_type(border_type)
                 .border_style(Style::default().fg(Color::Rgb(239, 68, 68)))
                 .bg(Color::Rgb(17, 24, 39));
             
@@ -222,10 +291,47 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             let block = Block::default()
                 .title(" Create Directory ")
                 .borders(Borders::ALL)
+                .border_type(border_type)
                 .border_style(Style::default().fg(Color::Rgb(56, 189, 248)))
                 .bg(Color::Rgb(17, 24, 39));
             
             let label = Paragraph::new("Enter directory name:").block(Block::default());
+            let input_text = Paragraph::new(input.text.as_str())
+                .style(Style::default().bg(Color::Rgb(55, 65, 81)).fg(Color::White))
+                .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)));
+
+            let sub_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Length(3),
+                    Constraint::Min(0),
+                ])
+                .margin(1)
+                .split(area);
+
+            f.render_widget(Clear, area);
+            f.render_widget(block, area);
+            f.render_widget(label, sub_chunks[0]);
+            f.render_widget(input_text, sub_chunks[1]);
+            
+            f.set_cursor_position(Position::new(
+                sub_chunks[1].x + 1 + input.visual_cursor_col(),
+                sub_chunks[1].y + 1,
+            ));
+        }
+        Dialog::InputTouch { input } => {
+            let area = centered_rect_min(60, 20, 36, 5, f.area());
+            f.render_widget(Clear, area);
+            let border_type = get_border_type(&app.config.border_type);
+            let block = Block::default()
+                .title(" Create File ")
+                .borders(Borders::ALL)
+                .border_type(border_type)
+                .border_style(Style::default().fg(Color::Rgb(56, 189, 248)))
+                .bg(Color::Rgb(17, 24, 39));
+            
+            let label = Paragraph::new("Enter file name:").block(Block::default());
             let input_text = Paragraph::new(input.text.as_str())
                 .style(Style::default().bg(Color::Rgb(55, 65, 81)).fg(Color::White))
                 .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(Color::DarkGray)));
@@ -261,6 +367,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             let block = Block::default()
                 .title(format!(" Copy: {} ", name))
                 .borders(Borders::ALL)
+                .border_type(border_type)
                 .border_style(Style::default().fg(Color::Rgb(56, 189, 248)))
                 .bg(Color::Rgb(17, 24, 39));
             
@@ -300,6 +407,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             let block = Block::default()
                 .title(format!(" Move: {} ", name))
                 .borders(Borders::ALL)
+                .border_type(border_type)
                 .border_style(Style::default().fg(Color::Rgb(56, 189, 248)))
                 .bg(Color::Rgb(17, 24, 39));
             
@@ -336,6 +444,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             let block = Block::default()
                 .title(format!(" Viewer: {} (Esc to Close) ", filename))
                 .borders(Borders::ALL)
+                .border_type(border_type)
                 .border_style(Style::default().fg(Color::Rgb(79, 70, 229)))
                 .bg(Color::Rgb(15, 23, 42));
 
@@ -360,13 +469,14 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 .title(" Settings Configuration ")
                 .title_alignment(Alignment::Center)
                 .borders(Borders::ALL)
+                .border_type(border_type)
                 .border_style(Style::default().fg(Color::Rgb(6, 182, 212)))
                 .bg(Color::Rgb(17, 24, 39));
 
             let row_style = |row: usize| -> Style {
                 if *active_row == row { Style::default().fg(Color::Yellow).bold() } else { Style::default() }
             };
-            let save_style = if *active_row == 6 { Style::default().fg(Color::Green).bold() } else { Style::default() };
+            let save_style = if *active_row == 7 { Style::default().fg(Color::Green).bold() } else { Style::default() };
 
             let r0_check = if app.config.show_hidden { "[X] Show" } else { "[ ] Hide" };
             let r1_val = format!("< {} >", app.config.sort_by.to_uppercase());
@@ -374,6 +484,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             let r3_check = if app.config.confirm_quit { "[X] Enabled" } else { "[ ] Disabled" };
             let r4_val = format!("< {} >", app.config.default_editor.to_uppercase());
             let r5_val = format!("< {} >", app.config.theme.to_uppercase());
+            let r6_val = format!("< {} >", app.config.border_type.to_uppercase());
 
             let text = vec![
                 Line::from(""),
@@ -410,6 +521,12 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 ]),
                 Line::from(""),
                 Line::from(vec![
+                    Span::styled("  Border Style:        ", row_style(6)),
+                    Span::styled(&r6_val, Style::default().fg(theme.accent)),
+                    Span::styled("  (live preview)", Style::default().fg(Color::DarkGray)),
+                ]),
+                Line::from(""),
+                Line::from(vec![
                     Span::styled("     [ SAVE & CLOSE CONFIGURATION ]     ", save_style),
                 ]).alignment(Alignment::Center),
                 Line::from(""),
@@ -426,6 +543,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 .title(" ⏻ EXIT ")
                 .title_alignment(Alignment::Center)
                 .borders(Borders::ALL)
+                .border_type(border_type)
                 .border_style(Style::default().fg(Color::Rgb(220, 60, 60)))
                 .bg(Color::Rgb(3, 10, 18));
 
@@ -494,6 +612,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 .title_alignment(Alignment::Center)
                 .title_bottom(Line::from("  Tab/←/→: switch  1-4: jump  Esc/q: close  ").alignment(Alignment::Center))
                 .borders(Borders::ALL)
+                .border_type(border_type)
                 .border_style(Style::default().fg(Color::Rgb(79, 70, 229)))
                 .bg(Color::Rgb(13, 17, 28));
 
@@ -543,9 +662,11 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 1 => vec![
                     Line::from(""),
                     head("File Operations"),
+                    row("F2 / Ctrl+I",   "Show item properties dialog"),
                     row("F5 / c",        "Copy selection to opposite panel"),
                     row("F6 / m",        "Move / Rename selection"),
                     row("F7 / n",        "Create new directory (mkdir)"),
+                    row("Shift+F7",      "Create empty file (touch)"),
                     row("F8 / Delete",   "Delete selection (with confirm)"),
                     Line::from(""),
                     head("Viewing & Editing"),
@@ -587,6 +708,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                     Line::from(""),
                     head("Preview & Tree"),
                     row("Ctrl+P",        "Toggle live file preview panel"),
+                    row("Shift+↑ / ↓",   "Scroll live preview text"),
                     row("Ctrl+T",        "Toggle directory tree view"),
                 ],
                 _ => vec![
@@ -628,6 +750,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 .title(" System Error ")
                 .title_alignment(Alignment::Center)
                 .borders(Borders::ALL)
+                .border_type(border_type)
                 .border_style(Style::default().fg(Color::Red))
                 .bg(Color::Rgb(31, 41, 55));
             
@@ -650,6 +773,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 .title(" Command Output ")
                 .title_alignment(Alignment::Center)
                 .borders(Borders::ALL)
+                .border_type(border_type)
                 .border_style(Style::default().fg(Color::Cyan))
                 .bg(Color::Rgb(17, 24, 39));
             f.render_widget(block.clone(), area);
@@ -701,6 +825,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 .title(" Bookmarks Manager ")
                 .title_alignment(Alignment::Center)
                 .borders(Borders::ALL)
+                .border_type(border_type)
                 .border_style(Style::default().fg(Color::Rgb(168, 85, 247)))
                 .bg(Color::Rgb(17, 24, 39));
 
@@ -876,6 +1001,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                     ),
                 ]).alignment(Alignment::Center))
                 .borders(Borders::ALL)
+                .border_type(border_type)
                 .border_style(Style::default().fg(Color::Rgb(0, 100, 130)))
                 .bg(Color::Rgb(3, 10, 18));
             f.render_widget(block.clone(), area);
@@ -1010,8 +1136,10 @@ fn draw_menu_dropdown(f: &mut Frame, active_menu: usize, item_idx: usize) {
 }
 
 fn draw_live_preview(f: &mut Frame, area: Rect, selected: Option<FileItem>, app: &mut App) {
+    let border_type = get_border_type(&app.config.border_type);
     let block = Block::default()
         .borders(Borders::ALL)
+        .border_type(border_type)
         .border_style(Style::default().fg(Color::Rgb(14, 116, 144)))
         .bg(Color::Rgb(15, 23, 42));
 
@@ -1035,16 +1163,24 @@ fn draw_live_preview(f: &mut Frame, area: Rect, selected: Option<FileItem>, app:
         (block.title(" Live Preview "), parse_ansi_text("No item selected"))
     };
 
+    let display_height = area.height.saturating_sub(2) as usize;
+    let total_lines = content_lines.1.len();
+    let max_offset = total_lines.saturating_sub(display_height);
+    if app.preview_scroll_offset > max_offset {
+        app.preview_scroll_offset = max_offset;
+    }
+
     let lines: Vec<Line> = content_lines.1
         .into_iter()
-        .take(area.height.saturating_sub(2) as usize)
+        .skip(app.preview_scroll_offset)
+        .take(display_height)
         .collect();
 
     let para = Paragraph::new(lines).block(content_lines.0).wrap(Wrap { trim: false });
     f.render_widget(para, area);
 }
 
-fn draw_panel(f: &mut Frame, area: Rect, panel: &mut Panel, is_active: bool, theme: &Theme) {
+fn draw_panel(f: &mut Frame, area: Rect, panel: &mut Panel, is_active: bool, theme: &Theme, border_type: BorderType) {
     let title_prefix = if is_active { "▶ " } else { "  " };
     let border_color = if is_active { theme.active_border } else { theme.inactive_border };
 
@@ -1067,6 +1203,7 @@ fn draw_panel(f: &mut Frame, area: Rect, panel: &mut Panel, is_active: bool, the
     let block = Block::default()
         .title(Line::from(title_spans))
         .borders(Borders::ALL)
+        .border_type(border_type)
         .border_style(Style::default().fg(border_color))
         .bg(theme.status_bg);
 
@@ -1272,7 +1409,8 @@ fn draw_beautiful_contents_panel(f: &mut Frame, area: Rect, app: &mut App, is_ac
         ])
         .split(area);
 
-    draw_panel(f, chunks[0], &mut app.right_panel, is_active, theme);
+    let border_type = get_border_type(&app.config.border_type);
+    draw_panel(f, chunks[0], &mut app.right_panel, is_active, theme, border_type);
 
     let selected_item = app.right_panel.get_selected_item().cloned();
     draw_live_preview(f, chunks[1], selected_item, app);

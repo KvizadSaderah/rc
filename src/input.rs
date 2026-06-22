@@ -134,6 +134,29 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                     KeyCode::Right => input.move_right(),
                     _ => {}
                 },
+                Dialog::InputTouch { input } => match key.code {
+                    KeyCode::Enter => {
+                        let text = input.text.clone();
+                        app.dialog = Dialog::None;
+                        app.execute_touch(text);
+                    }
+                    KeyCode::Esc => {
+                        app.dialog = Dialog::None;
+                        app.status_message = "Cancelled".to_string();
+                    }
+                    KeyCode::Char(c) => input.insert(c),
+                    KeyCode::Backspace => input.backspace(),
+                    KeyCode::Delete => input.delete(),
+                    KeyCode::Left => input.move_left(),
+                    KeyCode::Right => input.move_right(),
+                    _ => {}
+                },
+                Dialog::Properties { .. } => match key.code {
+                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => {
+                        app.dialog = Dialog::None;
+                    }
+                    _ => {}
+                },
                 Dialog::ConfirmCopy { source_path, input } => {
                     let path = source_path.clone();
                     match key.code {
@@ -246,7 +269,7 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                             }
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
-                            if *active_row < 6 {
+                            if *active_row < 7 {
                                 *active_row += 1;
                             }
                         }
@@ -283,6 +306,15 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                                     app.apply_config();
                                 }
                                 6 => {
+                                    app.config.border_type = match app.config.border_type.as_str() {
+                                        "plain" => "rounded".to_string(),
+                                        "rounded" => "thick".to_string(),
+                                        "thick" => "double".to_string(),
+                                        _ => "plain".to_string(),
+                                    };
+                                    app.apply_config();
+                                }
+                                7 => {
                                     let _ = save_config(&app.config);
                                     app.apply_config();
                                     app.dialog = Dialog::None;
@@ -840,9 +872,29 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
 
 
 fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
+    let prev_state = (
+        app.active_panel,
+        app.left_panel.path.clone(),
+        app.left_panel.selected,
+        app.right_panel.path.clone(),
+        app.right_panel.selected,
+    );
+
     let keys = &app.keymap;
 
-    if matches_key(&key, &keys.quit) {
+    if (key.code == KeyCode::Up && (key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::ALT)))
+        || (key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::SHIFT))
+    {
+        app.preview_scroll_offset = app.preview_scroll_offset.saturating_sub(1);
+    } else if (key.code == KeyCode::Down && (key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::ALT)))
+        || (key.code == KeyCode::Char('n') && key.modifiers.contains(KeyModifiers::SHIFT))
+    {
+        app.preview_scroll_offset = app.preview_scroll_offset.saturating_add(1);
+    } else if key.code == KeyCode::PageUp && key.modifiers.contains(KeyModifiers::SHIFT) {
+        app.preview_scroll_offset = app.preview_scroll_offset.saturating_sub(5);
+    } else if key.code == KeyCode::PageDown && key.modifiers.contains(KeyModifiers::SHIFT) {
+        app.preview_scroll_offset = app.preview_scroll_offset.saturating_add(5);
+    } else if matches_key(&key, &keys.quit) {
         if app.config.confirm_quit {
             app.dialog = Dialog::ConfirmQuit;
         } else {
@@ -863,9 +915,15 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
     } else if matches_key(&key, &keys.move_item) {
         app.initiate_move();
     } else if matches_key(&key, &keys.mkdir) {
-        app.initiate_mkdir();
+        if key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::CONTROL) {
+            app.initiate_touch();
+        } else {
+            app.initiate_mkdir();
+        }
     } else if matches_key(&key, &keys.delete) {
         app.initiate_delete();
+    } else if key.code == KeyCode::F(2) || (key.code == KeyCode::Char('i') && key.modifiers.contains(KeyModifiers::CONTROL)) {
+        app.initiate_properties();
     } else if matches_key(&key, &keys.menu) {
         app.dialog = Dialog::Menu {
             active_menu: 0,
@@ -1003,7 +1061,8 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
         if app.tree_mode && app.active_panel == ActivePanel::Left {
             app.toggle_tree_node();
         } else {
-            app.handle_enter(terminal);
+            let is_enter = key.code == KeyCode::Enter;
+            app.handle_enter_or_right(terminal, is_enter);
         }
     } else if matches_key(&key, &keys.tab) {
         app.toggle_panel();
@@ -1057,6 +1116,8 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
                 };
             }
             KeyCode::Char('r') => {
+                app.left_panel.last_git_query = None;
+                app.right_panel.last_git_query = None;
                 app.refresh_panels();
                 app.status_message = "Panels reloaded".to_string();
             }
@@ -1071,6 +1132,17 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
             }
             _ => {}
         }
+    }
+
+    let new_state = (
+        app.active_panel,
+        app.left_panel.path.clone(),
+        app.left_panel.selected,
+        app.right_panel.path.clone(),
+        app.right_panel.selected,
+    );
+    if prev_state != new_state {
+        app.preview_scroll_offset = 0;
     }
 }
 
