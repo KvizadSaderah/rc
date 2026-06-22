@@ -11,4 +11,5 @@ path = "src/main.rs"
 [dependencies]
 chrono = "0.4.45"
 crossterm = "0.29.0"
+notify = "8.2.0"
 ratatui = "0.30.2"
