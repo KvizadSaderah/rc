@@ -149,66 +149,8 @@ pub fn format_time(time: Option<SystemTime>) -> String {
     }
 }
 
-pub fn copy_item(src: &Path, dst: &Path) -> io::Result<()> {
-    let meta = fs::symlink_metadata(src)?;
-    let file_type = meta.file_type();
-    if file_type.is_symlink() {
-        let target = fs::read_link(src)?;
-        #[cfg(unix)]
-        {
-            std::os::unix::fs::symlink(target, dst)
-        }
-        #[cfg(not(unix))]
-        {
-            if src.is_dir() {
-                std::os::windows::fs::symlink_dir(target, dst)
-            } else {
-                std::os::windows::fs::symlink_file(target, dst)
-            }
-        }
-    } else if file_type.is_dir() {
-        fs::create_dir_all(dst)?;
-        for entry in fs::read_dir(src)? {
-            let entry = entry?;
-            let name = entry.file_name();
-            copy_item(&entry.path(), &dst.join(name))?;
-        }
-        Ok(())
-    } else {
-        fs::copy(src, dst).map(|_| ())
-    }
-}
-
-#[allow(dead_code)]
-pub fn copy_dir_all(src: impl AsRef<Path>, dst: impl AsRef<Path>) -> io::Result<()> {
-    copy_item(src.as_ref(), dst.as_ref())
-}
-
-pub fn move_item(src: &Path, dst: &Path) -> io::Result<()> {
-    if let Err(e) = fs::rename(src, dst) {
-        if e.kind() == std::io::ErrorKind::CrossesDevices
-            || e.raw_os_error() == Some(18) // EXDEV (Unix)
-            || e.raw_os_error() == Some(17) // ERROR_NOT_SAME_DEVICE (Windows)
-        {
-            copy_item(src, dst)?;
-            let is_symlink = src.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false);
-            if is_symlink {
-                fs::remove_file(src)?;
-            } else if src.is_dir() {
-                fs::remove_dir_all(src)?;
-            } else {
-                fs::remove_file(src)?;
-            }
-            Ok(())
-        } else {
-            Err(e)
-        }
-    } else {
-        Ok(())
-    }
-}
-
-
+// Recursive copy / cross-device move now live in the `fileops` module, where
+// they run on a background thread with progress reporting and cancellation.
 
 pub fn read_file_preview(path: &Path) -> String {
     let mut file = match File::open(path) {
@@ -542,63 +484,6 @@ mod tests {
     }
 
     #[test]
-    fn test_copy_item_and_symlinks() {
-        let root = std::env::temp_dir().join(format!("rc_test_copy_{}", chrono::Utc::now().timestamp_micros()));
-        let src = root.join("src");
-        let dst = root.join("dst");
-        fs::create_dir_all(&src).unwrap();
-
-        let file_path = src.join("file.txt");
-        fs::write(&file_path, "hello symlink").unwrap();
-
-        // Create a symlink
-        let link_path = src.join("link.txt");
-        #[cfg(unix)]
-        std::os::unix::fs::symlink("file.txt", &link_path).unwrap();
-        #[cfg(not(unix))]
-        std::os::windows::fs::symlink_file("file.txt", &link_path).unwrap();
-
-        // Copy item recursively
-        copy_item(&src, &dst).unwrap();
-
-        // Verify dst has file.txt and link.txt
-        assert!(dst.join("file.txt").exists());
-        assert_eq!(fs::read_to_string(dst.join("file.txt")).unwrap(), "hello symlink");
-
-        let dest_link = dst.join("link.txt");
-        let link_meta = fs::symlink_metadata(&dest_link).unwrap();
-        assert!(link_meta.file_type().is_symlink());
-
-        let target = fs::read_link(&dest_link).unwrap();
-        assert_eq!(target.to_str().unwrap(), "file.txt");
-
-        // Clean up
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
-    fn test_move_item() {
-        let root = std::env::temp_dir().join(format!("rc_test_move_{}", chrono::Utc::now().timestamp_micros()));
-        let src = root.join("src");
-        let dst = root.join("dst");
-        fs::create_dir_all(&src).unwrap();
-        fs::create_dir_all(&dst).unwrap();
-
-        let file_path = src.join("file.txt");
-        fs::write(&file_path, "hello move").unwrap();
-
-        // Move item
-        move_item(&file_path, &dst.join("moved.txt")).unwrap();
-
-        assert!(!file_path.exists());
-        assert!(dst.join("moved.txt").exists());
-        assert_eq!(fs::read_to_string(dst.join("moved.txt")).unwrap(), "hello move");
-
-        // Clean up
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
     fn test_lazygit_theme() {
         let theme = Theme::get_theme("lazygit");
         assert_eq!(theme.active_border, ratatui::style::Color::Rgb(74, 222, 128));
@@ -688,36 +573,6 @@ mod tests {
         panel.refresh();
         let time2 = panel.last_git_query;
         assert_eq!(time1, time2);
-    }
-
-    #[test]
-    fn test_symlink_deletion() {
-        let root = std::env::temp_dir().join(format!("rc_test_symlink_del_{}", chrono::Utc::now().timestamp_micros()));
-        let target_dir = root.join("target_dir");
-        let symlink_dir = root.join("symlink_dir");
-        fs::create_dir_all(&target_dir).unwrap();
-        
-        let file_in_target = target_dir.join("inside.txt");
-        fs::write(&file_in_target, "keep me").unwrap();
-
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(&target_dir, &symlink_dir).unwrap();
-        #[cfg(not(unix))]
-        std::os::windows::fs::symlink_dir(&target_dir, &symlink_dir).unwrap();
-
-        assert!(symlink_dir.exists());
-
-        let mut app = crate::app::App::new();
-        let _ = app.left_panel.set_path(root.clone());
-        app.active_panel = crate::panel::ActivePanel::Left;
-        
-        app.execute_delete(symlink_dir.clone());
-
-        assert!(!symlink_dir.exists());
-        assert!(target_dir.exists());
-        assert!(file_in_target.exists());
-
-        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

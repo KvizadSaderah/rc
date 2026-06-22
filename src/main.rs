@@ -2,6 +2,7 @@ mod theme;
 mod config;
 mod types;
 mod panel;
+mod fileops;
 mod app;
 mod input;
 mod ui;

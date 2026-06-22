@@ -12,6 +12,7 @@ use crossterm::{
 use ratatui::{backend::CrosstermBackend, Terminal};
 
 use crate::config::*;
+use crate::fileops::{self, JobState, OpKind};
 use crate::panel::*;
 use crate::types::*;
 
@@ -35,6 +36,7 @@ pub struct App {
     pub preview_cache: Option<PreviewCache>,
     pub running_process: Option<RunningProcess>,
     pub preview_scroll_offset: usize,
+    pub fs_job: Option<JobState>,
 }
 
 impl App {
@@ -69,6 +71,55 @@ impl App {
             preview_cache: None,
             running_process: None,
             preview_scroll_offset: 0,
+            fs_job: None,
+        }
+    }
+
+    /// True while a background copy/move/delete job is running.
+    pub fn is_fs_busy(&self) -> bool {
+        self.fs_job.is_some()
+    }
+
+    /// Poll the background fs job; on completion refresh panels, clear marks,
+    /// and surface a status message (including any collected per-item errors).
+    pub fn drain_fs_job(&mut self) {
+        let just_finished = match self.fs_job {
+            Some(ref mut job) => job.poll(),
+            None => false,
+        };
+        if !just_finished {
+            return;
+        }
+        if let Some(job) = self.fs_job.take() {
+            let err_count = job.errors.len();
+            if job.is_cancelled() {
+                self.status_message = format!("{} cancelled", job.kind.verb());
+            } else if err_count > 0 {
+                let first = job.errors.first().cloned().unwrap_or_default();
+                self.status_message = format!(
+                    "{} finished with {} error(s): {}",
+                    job.kind.past(), err_count, first
+                );
+                self.dialog = Dialog::Error {
+                    message: format!(
+                        "{} completed with {} error(s):\n\n{}",
+                        job.kind.past(), err_count,
+                        job.errors.join("\n")
+                    ),
+                };
+            } else {
+                self.status_message = format!("{} {} item(s)", job.kind.past(), job.total_files);
+            }
+            self.get_active_panel_mut().marked.clear();
+            self.refresh_panels();
+        }
+    }
+
+    /// Cancel the running fs job, if any.
+    pub fn cancel_fs_job(&mut self) {
+        if let Some(ref job) = self.fs_job {
+            job.cancel();
+            self.status_message = "Cancelling…".to_string();
         }
     }
 
@@ -819,40 +870,20 @@ impl App {
     pub fn execute_copy(&mut self, source: PathBuf, destination: String) {
         let dest_dir = PathBuf::from(destination);
         let marked_paths: Vec<PathBuf> = self.get_active_panel().marked.iter().cloned().collect();
-        
-        let result = if !marked_paths.is_empty() {
-            // Bulk selections copy
-            let mut err = None;
-            for path in &marked_paths {
-                let name = path.file_name().unwrap_or_default();
-                let target = dest_dir.join(name);
-                let res = copy_item(path, &target);
-                if let Err(e) = res {
-                    err = Some(e);
-                    break;
-                }
-            }
-            if let Some(e) = err { Err(e) } else { Ok(()) }
+
+        let items: Vec<(PathBuf, PathBuf)> = if !marked_paths.is_empty() {
+            // Bulk copy: each marked item lands inside the destination directory.
+            marked_paths
+                .iter()
+                .map(|p| (p.clone(), dest_dir.join(p.file_name().unwrap_or_default())))
+                .collect()
         } else {
-            // Single selection copy
-            let name = source.file_name().unwrap_or_default();
-            let target = dest_dir.join(name);
-            copy_item(&source, &target)
+            // Single copy: `destination` is the full target path (allows rename).
+            vec![(source, dest_dir)]
         };
 
-        match result {
-            Ok(_) => {
-                let count = if !marked_paths.is_empty() { marked_paths.len() } else { 1 };
-                self.status_message = format!("Successfully copied {} item(s)", count);
-                self.get_active_panel_mut().marked.clear();
-                self.refresh_panels();
-            }
-            Err(e) => {
-                self.dialog = Dialog::Error {
-                    message: format!("Copy failed: {}", e),
-                };
-            }
-        }
+        self.fs_job = Some(fileops::spawn(OpKind::Copy, items));
+        self.status_message = "Copying…".to_string();
     }
 
     pub fn initiate_move(&mut self) {
@@ -878,48 +909,29 @@ impl App {
         let dest_dir = PathBuf::from(destination);
         let marked_paths: Vec<PathBuf> = self.get_active_panel().marked.iter().cloned().collect();
 
-        let result = if !marked_paths.is_empty() {
-            // Bulk move
-            let mut err = None;
-            for path in &marked_paths {
-                let name = path.file_name().unwrap_or_default();
-                let target = dest_dir.join(name);
-                if let Err(e) = move_item(path, &target) {
-                    err = Some(e);
-                    break;
-                }
-            }
-            if let Some(e) = err { Err(e) } else { Ok(()) }
+        let items: Vec<(PathBuf, PathBuf)> = if !marked_paths.is_empty() {
+            // Bulk move: each marked item lands inside the destination directory.
+            marked_paths
+                .iter()
+                .map(|p| (p.clone(), dest_dir.join(p.file_name().unwrap_or_default())))
+                .collect()
         } else {
             // Single rename / move:
-            // If destination is an existing directory → move into it (append filename).
-            // If destination looks like a full path → use as-is (rename).
+            //   destination is an existing directory → move into it (append name)
+            //   otherwise treat destination as the full target path (rename)
             let target = if dest_dir.is_dir() {
-                let name = source.file_name().unwrap_or_default();
-                dest_dir.join(name)
+                dest_dir.join(source.file_name().unwrap_or_default())
             } else {
-                dest_dir.clone()
+                if let Some(parent) = dest_dir.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                dest_dir
             };
-            // Create parent directories if they don't exist
-            if let Some(parent) = target.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            move_item(&source, &target)
+            vec![(source, target)]
         };
 
-        match result {
-            Ok(_) => {
-                let count = if !marked_paths.is_empty() { marked_paths.len() } else { 1 };
-                self.status_message = format!("Successfully moved/renamed {} item(s)", count);
-                self.get_active_panel_mut().marked.clear();
-                self.refresh_panels();
-            }
-            Err(e) => {
-                self.dialog = Dialog::Error {
-                    message: format!("Move/Rename failed: {}", e),
-                };
-            }
-        }
+        self.fs_job = Some(fileops::spawn(OpKind::Move, items));
+        self.status_message = "Moving…".to_string();
     }
 
     pub fn initiate_mkdir(&mut self) {
@@ -1002,49 +1014,14 @@ impl App {
     pub fn execute_delete(&mut self, path: PathBuf) {
         let marked_paths: Vec<PathBuf> = self.get_active_panel().marked.iter().cloned().collect();
 
-        let result = if !marked_paths.is_empty() {
-            // Bulk delete
-            let mut err = None;
-            for p in &marked_paths {
-                let is_symlink = p.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false);
-                let res = if is_symlink {
-                    fs::remove_file(p)
-                } else if p.is_dir() {
-                    fs::remove_dir_all(p)
-                } else {
-                    fs::remove_file(p)
-                };
-                if let Err(e) = res {
-                    err = Some(e);
-                    break;
-                }
-            }
-            if let Some(e) = err { Err(e) } else { Ok(()) }
+        let items: Vec<(PathBuf, PathBuf)> = if !marked_paths.is_empty() {
+            marked_paths.into_iter().map(|p| (p, PathBuf::new())).collect()
         } else {
-            // Single delete
-            let is_symlink = path.symlink_metadata().map(|m| m.file_type().is_symlink()).unwrap_or(false);
-            if is_symlink {
-                fs::remove_file(&path)
-            } else if path.is_dir() {
-                fs::remove_dir_all(&path)
-            } else {
-                fs::remove_file(&path)
-            }
+            vec![(path, PathBuf::new())]
         };
 
-        match result {
-            Ok(_) => {
-                let count = if !marked_paths.is_empty() { marked_paths.len() } else { 1 };
-                self.status_message = format!("Deleted {} item(s)", count);
-                self.get_active_panel_mut().marked.clear();
-                self.refresh_panels();
-            }
-            Err(e) => {
-                self.dialog = Dialog::Error {
-                    message: format!("Failed to delete: {}", e),
-                };
-            }
-        }
+        self.fs_job = Some(fileops::spawn(OpKind::Delete, items));
+        self.status_message = "Deleting…".to_string();
     }
 
     pub fn initiate_properties(&mut self) {

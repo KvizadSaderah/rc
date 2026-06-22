@@ -1063,6 +1063,79 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             f.set_cursor_position(Position::new(cursor_screen_col, cursor_screen_row));
         }
     }
+
+    // Background filesystem job progress overlay (independent of Dialog state)
+    if app.fs_job.is_some() {
+        draw_fs_progress(f, app, border_type);
+    }
+}
+
+// Progress overlay for a running background copy/move/delete job.
+fn draw_fs_progress(f: &mut Frame, app: &App, border_type: BorderType) {
+    let job = match &app.fs_job {
+        Some(j) => j,
+        None => return,
+    };
+
+    let area = centered_rect_min(60, 30, 44, 9, f.area());
+    f.render_widget(Clear, area);
+
+    let title = format!(" {} ", job.kind.verb());
+    let block = Block::default()
+        .title(title)
+        .title_alignment(Alignment::Center)
+        .borders(Borders::ALL)
+        .border_type(border_type)
+        .border_style(Style::default().fg(Color::Cyan))
+        .bg(Color::Rgb(17, 24, 39));
+    f.render_widget(block.clone(), area);
+    let inner = block.inner(area);
+
+    let pct = (job.ratio() * 100.0).round() as u16;
+    let bar_width = inner.width.saturating_sub(2) as usize;
+    let filled = (bar_width as f64 * job.ratio()).round() as usize;
+    let bar: String = "█".repeat(filled) + &"░".repeat(bar_width.saturating_sub(filled));
+
+    let current = if job.current.is_empty() { "scanning…".to_string() } else { job.current.clone() };
+    let current_disp = truncate_middle(&current, bar_width);
+
+    let bytes_line = if job.total_bytes > 0 {
+        format!("{} / {}", format_size(job.done_bytes), format_size(job.total_bytes))
+    } else {
+        format!("{} / {} items", job.done_files, job.total_files)
+    };
+
+    let text = vec![
+        Line::from(Span::styled(current_disp, Style::default().fg(Color::White))),
+        Line::from(""),
+        Line::from(Span::styled(bar, Style::default().fg(Color::Green))),
+        Line::from(Span::styled(
+            format!("{}%   {}   ({}/{} files)", pct, bytes_line, job.done_files, job.total_files),
+            Style::default().fg(Color::Gray),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "Esc / c — cancel",
+            Style::default().fg(Color::DarkGray),
+        ))
+        .alignment(Alignment::Center),
+    ];
+    let para = Paragraph::new(text).wrap(Wrap { trim: true });
+    f.render_widget(para, inner);
+}
+
+/// Shorten a string to `max` columns, keeping the head and tail with an ellipsis.
+fn truncate_middle(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max || max < 4 {
+        return s.chars().take(max).collect();
+    }
+    let head = (max - 1) / 2;
+    let tail = max - 1 - head;
+    let mut out: String = chars[..head].iter().collect();
+    out.push('…');
+    out.extend(&chars[chars.len() - tail..]);
+    out
 }
 
 // Drops down overlay block under the active top tab
