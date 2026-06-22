@@ -305,82 +305,33 @@ impl App {
     pub fn execute_overlay_command(active_dir: &std::path::Path, cmd: &str) -> (Vec<String>, bool, Option<std::process::Child>) {
         let mut lines = Vec::new();
 
-        // Guard: prevent launching rc inside rc (recursion)
-        let self_names = ["rc", "rust-commander"];
-        let first_word = cmd.split_whitespace().next().unwrap_or("");
-        let first_word_base = std::path::Path::new(first_word)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(first_word);
-
-        if self_names.contains(&first_word_base) {
+        // Guard: prevent launching rc inside rc (recursion).
+        if crate::shell::is_self(cmd) {
             lines.push("⚠ Cannot launch rc inside rc (would cause recursion).".to_string());
             lines.push("  Use a separate terminal window instead.".to_string());
             return (lines, false, None);
         }
 
-        // Detect TUI / full-screen programs that need terminal control.
-        // These cannot be captured via .output() — they must be run via .spawn().
-        let tui_programs = [
-            "lazygit", "vim", "nvim", "nano", "emacs", "htop", "btop",
-            "less", "more", "man", "top", "mc", "ranger", "nnn", "tig",
-            "fzf", "zsh", "bash", "fish", "python", "irb", "node", "lua",
-        ];
-        let is_tui = tui_programs.contains(&first_word_base);
-
-        if is_tui {
-            lines.push(format!("[Launching {}...]", first_word_base));
-
-            // Step 1: fully surrender the terminal to the child TUI app
-            let _ = crossterm::terminal::disable_raw_mode();
-            let _ = crossterm::execute!(
-                std::io::stdout(),
-                crossterm::terminal::LeaveAlternateScreen,
-                crossterm::cursor::Show
-            );
-
-            // Step 2: run the TUI program with inherited stdin/stdout/stderr
-            let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-            let _ = std::process::Command::new(&shell)
-                .arg("-c")
-                .arg(cmd)
-                .current_dir(active_dir)
-                .stdin(std::process::Stdio::inherit())
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit())
-                .status();
-
-            // Step 3: re-enable raw mode and enter alternate screen
-            // We must do this BEFORE ratatui draws, and signal caller to clear.
-            let _ = crossterm::terminal::enable_raw_mode();
-            let _ = crossterm::execute!(
-                std::io::stdout(),
-                crossterm::terminal::EnterAlternateScreen,
-                crossterm::cursor::Hide
-            );
-
-            lines.push(format!("[{} exited — press Esc to return to rc]", first_word_base));
-            // needs_clear = true so caller calls terminal.clear()
+        // Full-screen / interactive programs need the real TTY — run them in
+        // the foreground (suspending the alt-screen) instead of capturing them.
+        if crate::shell::needs_tty(cmd) {
+            let prog = crate::shell::first_program(cmd);
+            lines.push(format!("[Launching {}...]", prog));
+            let _ = crate::shell::run_foreground(cmd, active_dir);
+            // needs_clear = true so the caller calls terminal.clear() before redraw.
+            lines.push(format!("[{} exited — press Esc to return to rc]", prog));
             return (lines, true, None);
         }
 
-        // Spawn the command asynchronously with piped stdout/stderr
-        let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-        match std::process::Command::new(&shell)
-            .arg("-c")
-            .arg(cmd)
-            .current_dir(active_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn() {
-            Ok(child) => {
-                return (lines, false, Some(child));
-            }
+        // Everything else streams via a piped child (stdin = null so an
+        // unexpected TUI can't hang the overlay waiting on input).
+        match crate::shell::spawn_piped(cmd, active_dir) {
+            Ok(child) => (lines, false, Some(child)),
             Err(e) => {
                 lines.push(format!("Failed to execute command: {}", e));
+                (lines, false, None)
             }
         }
-        (lines, false, None)
     }
 
     // Wrap a spawned child process into a RunningProcess with threaded readers
@@ -742,38 +693,15 @@ impl App {
             return;
         }
 
-        // Determine if command should be run interactively in the foreground
-        let is_interactive = {
-            let first_word = trimmed.split_whitespace()
-                .find(|w| !w.contains('='))
-                .unwrap_or("")
-                .trim_matches(|c| c == '\'' || c == '"');
-            let interactive_bins = [
-                "vim", "vi", "nano", "emacs", "neovim", "nvim", "top", 
-                "htop", "less", "more", "ssh", "sftp", "man", "tail", "watch",
-                "python", "python3", "node", "git", "docker", "docker-compose",
-                "gdb", "irb", "nc", "telnet", "ping", "tmux", "screen",
-                "bash", "zsh", "sh"
-            ];
-            interactive_bins.contains(&first_word)
-        };
+        // Interactive / full-screen programs run in the foreground with the
+        // real TTY (shared detection with the Ctrl+O overlay); everything else
+        // runs captured.
+        if crate::shell::needs_tty(trimmed) {
+            crate::shell::suspend();
 
-        #[cfg(unix)]
-        let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-        #[cfg(windows)]
-        let shell = "cmd.exe".to_string();
-
-        if is_interactive {
-            let _ = disable_raw_mode();
-            let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture, crossterm::cursor::Show);
-            
             println!("$ {}\n", trimmed);
-            
-            let status = std::process::Command::new(shell)
-                .current_dir(&active_dir)
-                .arg(if cfg!(windows) { "/c" } else { "-c" })
-                .arg(trimmed)
-                .status();
+
+            let status = crate::shell::build(trimmed, &active_dir).status();
 
             match status {
                 Ok(s) => {
@@ -789,17 +717,12 @@ impl App {
             let mut input = String::new();
             let _ = io::stdin().read_line(&mut input);
 
-            let _ = enable_raw_mode();
-            let _ = execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture, crossterm::cursor::Hide);
+            crate::shell::resume();
             let _ = terminal.clear();
             self.refresh_panels();
         } else {
             // Run silently and capture output
-            let output = std::process::Command::new(shell)
-                .current_dir(&active_dir)
-                .arg(if cfg!(windows) { "/c" } else { "-c" })
-                .arg(trimmed)
-                .output();
+            let output = crate::shell::build(trimmed, &active_dir).output();
 
             match output {
                 Ok(out) => {
