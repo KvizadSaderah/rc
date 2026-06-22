@@ -906,6 +906,14 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
         } else {
             app.status_message = "Folder is already bookmarked".to_string();
         }
+    } else if key.code == KeyCode::Char('y') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        let path_str = app.get_active_panel().path.to_string_lossy().to_string();
+        let copied = copy_to_clipboard(&path_str);
+        if copied {
+            app.status_message = format!("Path copied: {}", path_str);
+        } else {
+            app.status_message = "Failed to copy path (no clipboard tool found)".to_string();
+        }
     } else if key.code == KeyCode::Char('a') && key.modifiers.contains(KeyModifiers::CONTROL) {
         let panel = app.get_active_panel_mut();
         let all_paths: Vec<PathBuf> = panel.items.iter()
@@ -1045,5 +1053,56 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
             }
             _ => {}
         }
+    }
+}
+
+// =============================================================================
+// Clipboard Helper
+// =============================================================================
+
+/// Copies the given text to the system clipboard.
+/// Uses `pbcopy` on macOS, and tries `xclip` then `xsel` on Linux.
+/// Returns true if the copy succeeded.
+fn copy_to_clipboard(text: &str) -> bool {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Ok(mut child) = Command::new("pbcopy")
+            .stdin(Stdio::piped())
+            .spawn()
+        {
+            if let Some(stdin) = child.stdin.take() {
+                let mut stdin = stdin;
+                let _ = stdin.write_all(text.as_bytes());
+            }
+            return child.wait().map(|s| s.success()).unwrap_or(false);
+        }
+        return false;
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        // Try xclip first, then xsel
+        for (cmd, args) in &[
+            ("xclip", vec!["-selection", "clipboard"]),
+            ("xsel", vec!["--clipboard", "--input"]),
+        ] {
+            if let Ok(mut child) = Command::new(cmd)
+                .args(args)
+                .stdin(Stdio::piped())
+                .spawn()
+            {
+                if let Some(stdin) = child.stdin.take() {
+                    let mut stdin = stdin;
+                    let _ = stdin.write_all(text.as_bytes());
+                }
+                if child.wait().map(|s| s.success()).unwrap_or(false) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
