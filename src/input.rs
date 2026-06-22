@@ -21,7 +21,15 @@ use crate::ui::{ui, centered_rect};
 // =============================================================================
 
 pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> io::Result<()> {
-    let mut tick: u32 = 0;
+    // Event-driven refresh via notify, with a slow periodic fallback if the
+    // platform watcher can't be set up.
+    let mut watcher = crate::watcher::FsWatcher::new();
+    let mut dirty = false;
+    let mut dirty_since = std::time::Instant::now();
+    let mut last_fallback = std::time::Instant::now();
+    const DEBOUNCE: Duration = Duration::from_millis(150);
+    const FALLBACK: Duration = Duration::from_secs(4);
+
     loop {
         // Drain output from any running background process
         app.drain_process_output();
@@ -29,13 +37,30 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
         // Drain progress from any running background filesystem job
         app.drain_fs_job();
 
-        // Auto-refresh panels every ~2s to pick up external filesystem changes.
-        // Suppressed while a background fs job runs (it churns the same dirs).
-        tick = tick.wrapping_add(1);
-        if tick % 40 == 0 {
-            if matches!(app.dialog, Dialog::None) && !app.is_fs_busy() {
+        let idle = matches!(app.dialog, Dialog::None) && !app.is_fs_busy();
+
+        // Keep the watcher pointed at the two visible panel directories.
+        if let Some(w) = watcher.as_mut() {
+            w.sync_paths(&[app.left_panel.path.clone(), app.right_panel.path.clone()]);
+            if w.drain() {
+                dirty = true;
+                dirty_since = std::time::Instant::now();
+            }
+        }
+
+        // Refresh after a quiet period (coalesces bursts of external writes).
+        if idle && dirty && dirty_since.elapsed() >= DEBOUNCE {
+            app.refresh_panels();
+            dirty = false;
+        }
+
+        // Fallback poll: primary path when there is no watcher, and a safety net
+        // even when there is (catches anything the backend may miss).
+        if idle && last_fallback.elapsed() >= FALLBACK {
+            if watcher.is_none() || !dirty {
                 app.refresh_panels();
             }
+            last_fallback = std::time::Instant::now();
         }
 
         terminal.draw(|f| ui(f, &mut app))?;
