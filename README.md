@@ -84,6 +84,29 @@ The navigation controls dynamically adapt depending on whether you are using **S
 > **Live updates:** Panels refresh automatically when files change on disk
 > (via a filesystem watcher), so external changes appear without pressing **R**.
 
+### Panes (Tiling)
+
+Beyond the classic two-pane view you can split the workspace into more panes,
+tiling-window-manager style. Keyboard-first, mouse-friendly.
+
+| Shortcut | Action |
+|---|---|
+| **\|** | Split the focused pane into a left \| right pair |
+| **-** | Split the focused pane into a top / bottom pair |
+| **Ctrl + W** | Close the focused pane (refuses the last one; collapses to its sibling) |
+| **Tab** | Cycle focus across all panes |
+| **Ctrl + ← ↑ ↓ →** | Resize the focused pane |
+
+### Mouse
+
+Mouse works everywhere, while the keyboard stays first-class:
+
+- **Click** a pane to focus it and select the item under the cursor; **click the
+  already-selected item** to open it (enter directory / open file).
+- **Wheel** scrolls the selection in the pane under the cursor.
+- **Drag a seam** between panes to resize the split live.
+- **Click the header row** to open the menu bar.
+
 ---
 
 ## ⚙️ Configuration File (`config.ini`)
