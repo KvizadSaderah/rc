@@ -120,6 +120,24 @@ impl App {
         };
     }
 
+    /// Sync inactive panel to the same directory as the active panel.
+    pub fn sync_panels(&mut self) {
+        let active_path = self.get_active_panel().path.clone();
+        let inactive = match self.active_panel {
+            ActivePanel::Left => &mut self.right_panel,
+            ActivePanel::Right => &mut self.left_panel,
+        };
+        let _ = inactive.set_path(active_path);
+    }
+
+    /// Swap left and right panel directories.
+    pub fn swap_panels(&mut self) {
+        let left_path = self.left_panel.path.clone();
+        let right_path = self.right_panel.path.clone();
+        let _ = self.left_panel.set_path(right_path);
+        let _ = self.right_panel.set_path(left_path);
+    }
+
     pub fn init_tree(&mut self) {
         let root_path = self.left_panel.path.clone();
         self.tree_nodes.clear();

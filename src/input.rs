@@ -914,6 +914,15 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
         } else {
             app.status_message = "Failed to copy path (no clipboard tool found)".to_string();
         }
+    } else if key.code == KeyCode::Char('u') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        // Ctrl+U — swap left and right panels
+        app.swap_panels();
+        app.status_message = "Panels swapped".to_string();
+    } else if key.code == KeyCode::Char('=') && key.modifiers.is_empty() {
+        // = — sync inactive panel to active panel's directory
+        let active_path = app.get_active_panel().path.to_string_lossy().to_string();
+        app.sync_panels();
+        app.status_message = format!("Other panel synced to: {}", active_path);
     } else if key.code == KeyCode::Char('a') && key.modifiers.contains(KeyModifiers::CONTROL) {
         let panel = app.get_active_panel_mut();
         let all_paths: Vec<PathBuf> = panel.items.iter()
