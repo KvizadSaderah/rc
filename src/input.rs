@@ -26,10 +26,14 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
         // Drain output from any running background process
         app.drain_process_output();
 
-        // Auto-refresh panels every ~2s to pick up external filesystem changes
+        // Drain progress from any running background filesystem job
+        app.drain_fs_job();
+
+        // Auto-refresh panels every ~2s to pick up external filesystem changes.
+        // Suppressed while a background fs job runs (it churns the same dirs).
         tick = tick.wrapping_add(1);
         if tick % 40 == 0 {
-            if matches!(app.dialog, Dialog::None) {
+            if matches!(app.dialog, Dialog::None) && !app.is_fs_busy() {
                 app.refresh_panels();
             }
         }
@@ -86,6 +90,15 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
         };
 
         if key.kind == event::KeyEventKind::Release {
+            continue;
+        }
+
+        // While a background fs job runs, the UI is modal: only allow cancel.
+        if app.is_fs_busy() {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('C') => app.cancel_fs_job(),
+                _ => {}
+            }
             continue;
         }
 
