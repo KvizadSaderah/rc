@@ -126,6 +126,7 @@ impl App {
     pub fn new_with_options(write_last_dir: Option<PathBuf>, starting_dir: Option<PathBuf>) -> Self {
         let config = load_config();
         let keymap = load_keymap(&config);
+        let image_preview_protocol = config.image_preview_protocol.clone();
         
         let mut current_dir = starting_dir.unwrap_or_else(|| {
             env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
@@ -170,14 +171,44 @@ impl App {
             fs_job: None,
             write_last_dir,
             image_picker: {
-                if cfg!(test) || std::env::var("TERM_PROGRAM").ok().as_deref() == Some("Apple_Terminal") {
+                if cfg!(test) {
                     None
                 } else {
-                    let options = ratatui_image::picker::cap_parser::QueryStdioOptions {
-                        timeout: std::time::Duration::from_millis(50),
-                        ..Default::default()
-                    };
-                    ratatui_image::picker::Picker::from_query_stdio_with_options(options).ok()
+                    match image_preview_protocol.to_lowercase().as_str() {
+                        "none" => None,
+                        "halfblocks" => Some(ratatui_image::picker::Picker::halfblocks()),
+                        "kitty" => {
+                            let mut picker = ratatui_image::picker::Picker::halfblocks();
+                            picker.set_protocol_type(ratatui_image::picker::ProtocolType::Kitty);
+                            Some(picker)
+                        }
+                        "iterm2" => {
+                            let mut picker = ratatui_image::picker::Picker::halfblocks();
+                            picker.set_protocol_type(ratatui_image::picker::ProtocolType::Iterm2);
+                            Some(picker)
+                        }
+                        "sixel" => {
+                            let mut picker = ratatui_image::picker::Picker::halfblocks();
+                            picker.set_protocol_type(ratatui_image::picker::ProtocolType::Sixel);
+                            Some(picker)
+                        }
+                        _ => {
+                            if std::env::var("TERM_PROGRAM").ok().as_deref() == Some("Apple_Terminal") {
+                                Some(ratatui_image::picker::Picker::halfblocks())
+                            } else {
+                                let options = ratatui_image::picker::cap_parser::QueryStdioOptions {
+                                    timeout: std::time::Duration::from_millis(50),
+                                    ..Default::default()
+                                };
+                                let mut picker = ratatui_image::picker::Picker::from_query_stdio_with_options(options)
+                                    .unwrap_or_else(|_| ratatui_image::picker::Picker::halfblocks());
+                                if let Some(forced) = Self::forced_protocol_from_env() {
+                                    picker.set_protocol_type(forced);
+                                }
+                                Some(picker)
+                            }
+                        }
+                    }
                 }
             },
             viewer_image_protocol: None,
@@ -907,7 +938,6 @@ impl App {
                     }
                 }
                 PreviewContent::Image(dyn_img) => {
-                    let mut updated = false;
                     if let PreviewState::Loading { ref path, .. } = self.preview_state {
                         if path == &res.path {
                             let mut protocol_opt = None;
@@ -926,25 +956,22 @@ impl App {
                                     protocol,
                                 };
                                 got_any = true;
-                                updated = true;
                             }
                         }
                     }
-                    if !updated {
-                        if let Dialog::ViewFile { ref path, .. } = self.dialog {
-                            if path == &res.path {
-                                let mut protocol_opt = None;
-                                if let Some(ref mut picker) = self.image_picker {
-                                    protocol_opt = Some(picker.new_resize_protocol(dyn_img.clone()));
-                                }
-                                if protocol_opt.is_none() {
-                                    let fallback = ratatui_image::picker::Picker::halfblocks();
-                                    protocol_opt = Some(fallback.new_resize_protocol(dyn_img));
-                                }
-                                if let Some(protocol) = protocol_opt {
-                                    self.viewer_image_protocol = Some(protocol);
-                                    got_any = true;
-                                }
+                    if let Dialog::ViewFile { ref path, .. } = self.dialog {
+                        if path == &res.path {
+                            let mut protocol_opt = None;
+                            if let Some(ref mut picker) = self.image_picker {
+                                protocol_opt = Some(picker.new_resize_protocol(dyn_img.clone()));
+                            }
+                            if protocol_opt.is_none() {
+                                let fallback = ratatui_image::picker::Picker::halfblocks();
+                                protocol_opt = Some(fallback.new_resize_protocol(dyn_img));
+                            }
+                            if let Some(protocol) = protocol_opt {
+                                self.viewer_image_protocol = Some(protocol);
+                                got_any = true;
                             }
                         }
                     }
@@ -998,6 +1025,15 @@ impl App {
         }
     }
 
+/// Force iTerm2 inline protocol on terminals that mis-report Kitty over stdio.
+fn forced_protocol_from_env() -> Option<ratatui_image::picker::ProtocolType> {
+    let term_program = std::env::var("TERM_PROGRAM").unwrap_or_default();
+    let lc_terminal = std::env::var("LC_TERMINAL").unwrap_or_default();
+    let iterm2_like = matches!(term_program.as_str(), "iTerm.app" | "mintty" | "WarpTerminal" | "rio")
+        || lc_terminal == "iTerm2";
+    iterm2_like.then_some(ratatui_image::picker::ProtocolType::Iterm2)
+}
+
 async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> PreviewContent {
     if path.is_dir() {
         let path_clone = path.to_path_buf();
@@ -1013,8 +1049,10 @@ async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> PreviewCon
         let path_clone = path.to_path_buf();
         if let Ok(img) = tokio::task::spawn_blocking(move || {
             if let Ok(raw_img) = image::open(&path_clone) {
-                // Downsample large images in background thread to prevent UI lag/freeze during protocol rendering
-                Some(raw_img.thumbnail(1200, 1200))
+                // Downsample large images in background thread based on cols and rows to prevent UI lag/freeze during protocol rendering
+                let w = (cols as u32 * 12).max(100);
+                let h = (rows as u32 * 24).max(100);
+                Some(raw_img.thumbnail(w, h))
             } else {
                 None
             }
