@@ -841,6 +841,11 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                     row("Ctrl+P",        "Toggle live file preview panel"),
                     row("Shift+↑ / ↓",   "Scroll live preview text"),
                     row("Ctrl+T",        "Toggle directory tree view"),
+                    Line::from(""),
+                    head("Search & Jump (CLI)"),
+                    row("Ctrl+F",        "Fuzzy find files (fd + fzf)"),
+                    row("Ctrl+G",        "Live grep file text (rg + fzf)"),
+                    row("Ctrl+J",        "Zoxide quick directory jump"),
                 ],
                 _ => vec![
                     Line::from(""),
