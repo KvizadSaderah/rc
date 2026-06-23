@@ -117,17 +117,30 @@ pub fn ui(f: &mut Frame, app: &mut App) {
         app.leaf_rects = vec![(focus, panels_layout[0])];
         let selected_item = app.get_active_panel().get_selected_item().cloned();
         if let Some(p) = app.panels[focus].as_mut() {
-            draw_panel(f, panels_layout[0], p, true, &theme, border_type, app.config.use_nerd_fonts);
+            draw_panel(f, panels_layout[0], p, PaneRole::Active, &theme, border_type, app.config.use_nerd_fonts);
         }
         draw_live_preview(f, panels_layout[1], selected_item, app);
     } else {
         // Normal mode: render the tiling split tree.
         let focus = app.focus;
+        let partner = app.partner;
+        let pinned = app.target_pinned;
         let rects = app.root.rects(workspace);
         app.leaf_rects = rects.clone();
+        // Flag the partner (copy/move target) when 3+ panes are open, or whenever
+        // a target is explicitly pinned. With two unpinned panes the "other" pane
+        // is unambiguous and the hint is just noise.
+        let show_partner = rects.len() > 2 || pinned;
         for (id, rect) in rects {
             if let Some(p) = app.panels[id].as_mut() {
-                draw_panel(f, rect, p, id == focus, &theme, border_type, app.config.use_nerd_fonts);
+                let role = if id == focus {
+                    PaneRole::Active
+                } else if show_partner && id == partner {
+                    PaneRole::Target { pinned }
+                } else {
+                    PaneRole::Idle
+                };
+                draw_panel(f, rect, p, role, &theme, border_type, app.config.use_nerd_fonts);
             }
         }
     }
@@ -179,12 +192,21 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             } else {
                 String::new()
             };
-            // Right: position in list + pane count when tiled.
+            // Right: position in list, plus an adaptive source→target role hint
+            // when the destination is ambiguous (3+ panes) or explicitly pinned.
             let pos = panel.selected + 1;
             let total = panel.items.len();
             let panes = app.root.leaves().len();
-            let right = if panes > 2 {
-                format!("{}/{}  ·  {} panes ", pos, total, panes)
+            let basename = |p: &std::path::Path| {
+                p.file_name()
+                    .map(|s| s.to_string_lossy().to_string())
+                    .unwrap_or_else(|| p.to_string_lossy().to_string())
+            };
+            let right = if panes > 2 || app.target_pinned {
+                let src = basename(&app.get_active_panel().path);
+                let dst = basename(&app.panel(app.partner).path);
+                let arrow = if app.target_pinned { "📌" } else { "→" };
+                format!("● {}  {}  ○ {}  ·  {}/{} ", src, arrow, dst, pos, total)
             } else {
                 format!("{}/{} ", pos, total)
             };
@@ -746,7 +768,8 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 0 => vec![
                     Line::from(""),
                     head("Panel Navigation"),
-                    row("Tab",           "Cycle focus across panes"),
+                    row("Tab",           "Cycle focus to next pane (source ●)"),
+                    row("Shift+Tab",     "Cycle focus to previous pane"),
                     row("↑ / k",         "Move cursor up"),
                     row("↓ / j",         "Move cursor down"),
                     row("Enter",         "Open directory or file viewer"),
@@ -759,6 +782,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                     row("-",             "Split focused pane top / bottom"),
                     row("Ctrl+W",        "Close focused pane (not the last)"),
                     row("Ctrl+←↑↓→",     "Resize the focused pane"),
+                    row("t",             "Pin focused pane as copy/move target ○"),
                     Line::from(""),
                     head("Selection & Marking"),
                     row("Space",         "Tag/mark file for bulk operation"),
@@ -770,8 +794,8 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                     Line::from(""),
                     head("File Operations"),
                     row("F2 / Ctrl+I",   "Show item properties dialog"),
-                    row("F5 / c",        "Copy selection to opposite panel"),
-                    row("F6 / m",        "Move / Rename selection"),
+                    row("F5 / c",        "Copy selection to target pane ○"),
+                    row("F6 / m",        "Move / Rename selection to target ○"),
                     row("F7 / n",        "Create new directory (mkdir)"),
                     row("Shift+F7",      "Create empty file (touch)"),
                     row("F8 / Delete",   "Delete selection (with confirm)"),
@@ -1376,16 +1400,45 @@ fn draw_live_preview(f: &mut Frame, area: Rect, selected: Option<FileItem>, app:
     f.render_widget(para, area);
 }
 
-fn draw_panel(f: &mut Frame, area: Rect, panel: &mut Panel, is_active: bool, theme: &Theme, border_type: BorderType, use_nerd_fonts: bool) {
-    let border_color = if is_active { theme.active_border } else { theme.inactive_border };
+/// How a pane is rendered relative to the current copy/move operation.
+#[derive(Clone, Copy)]
+enum PaneRole {
+    /// The focused pane — the copy/move source.
+    Active,
+    /// The partner pane — the copy/move destination. `pinned` marks a target
+    /// the user explicitly fixed in place.
+    Target { pinned: bool },
+    /// Any other pane.
+    Idle,
+}
+
+fn draw_panel(f: &mut Frame, area: Rect, panel: &mut Panel, role: PaneRole, theme: &Theme, border_type: BorderType, use_nerd_fonts: bool) {
+    let is_active = matches!(role, PaneRole::Active);
+    let is_partner = matches!(role, PaneRole::Target { .. });
+    let border_color = if is_active {
+        theme.active_border
+    } else if is_partner {
+        theme.text_highlight
+    } else {
+        theme.inactive_border
+    };
     let title_fg = if is_active { Color::White } else { Color::Rgb(120, 130, 145) };
 
-    // Focus marker + path (home collapsed to ~).
-    let marker = if is_active { "● " } else { "  " };
+    // Focus marker + path (home collapsed to ~). The partner pane (copy/move
+    // destination) is flagged with ○ so the source→target link is visible when
+    // more than two panes are open.
+    let marker = if is_active { "● " } else if is_partner { "○ " } else { "  " };
     let mut title_spans = vec![
         Span::styled(marker, Style::default().fg(border_color).bold()),
         Span::styled(pretty_path(&panel.path), Style::default().fg(title_fg).bold()),
     ];
+    if let PaneRole::Target { pinned } = role {
+        let label = if pinned { "  → target 📌" } else { "  → target" };
+        title_spans.push(Span::styled(
+            label,
+            Style::default().fg(theme.text_highlight).bold(),
+        ));
+    }
     if let Some(ref branch) = panel.git_branch {
         title_spans.push(Span::styled(
             format!("  {}", branch),
@@ -1627,7 +1680,8 @@ fn draw_beautiful_contents_panel(f: &mut Frame, area: Rect, app: &mut App, is_ac
     let partner = app.partner;
     let selected_item = app.panel(partner).get_selected_item().cloned();
     if let Some(p) = app.panels[partner].as_mut() {
-        draw_panel(f, chunks[0], p, is_active, theme, border_type, app.config.use_nerd_fonts);
+        let role = if is_active { PaneRole::Active } else { PaneRole::Idle };
+        draw_panel(f, chunks[0], p, role, theme, border_type, app.config.use_nerd_fonts);
     }
     draw_live_preview(f, chunks[1], selected_item, app);
 }

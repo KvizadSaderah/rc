@@ -39,6 +39,8 @@ pub struct Keymap {
     pub left: Vec<(KeyCode, KeyModifiers)>,
     pub right: Vec<(KeyCode, KeyModifiers)>,
     pub tab: Vec<(KeyCode, KeyModifiers)>,
+    pub tab_prev: Vec<(KeyCode, KeyModifiers)>,
+    pub pin_target: Vec<(KeyCode, KeyModifiers)>,
 }
 
 impl Keymap {
@@ -61,6 +63,8 @@ impl Keymap {
             left: vec![(KeyCode::Left, KeyModifiers::empty()), (KeyCode::Backspace, KeyModifiers::empty())],
             right: vec![(KeyCode::Right, KeyModifiers::empty()), (KeyCode::Enter, KeyModifiers::empty())],
             tab: vec![(KeyCode::Tab, KeyModifiers::empty())],
+            tab_prev: vec![(KeyCode::BackTab, KeyModifiers::empty())],
+            pin_target: vec![(KeyCode::Char('t'), KeyModifiers::empty())],
         }
     }
 
