@@ -985,6 +985,7 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                     };
                     match key.code {
                         KeyCode::Esc | KeyCode::F(3) => {
+                            app.viewer_image_protocol = None;
                             app.dialog = Dialog::None;
                         }
                         KeyCode::Tab => {
@@ -993,6 +994,7 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                         _ if *focused => {
                             match key.code {
                                 KeyCode::Char('q') => {
+                                    app.viewer_image_protocol = None;
                                     app.dialog = Dialog::None;
                                 }
                                 KeyCode::Up | KeyCode::Char('k') => {
