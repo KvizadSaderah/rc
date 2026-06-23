@@ -67,6 +67,7 @@ pub struct App {
     pub fs_job: Option<JobState>,
     pub write_last_dir: Option<PathBuf>,
     pub image_picker: Option<ratatui_image::picker::Picker>,
+    pub viewer_image_protocol: Option<ratatui_image::protocol::StatefulProtocol>,
 }
 
 static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
@@ -169,12 +170,17 @@ impl App {
             fs_job: None,
             write_last_dir,
             image_picker: {
-                let options = ratatui_image::picker::cap_parser::QueryStdioOptions {
-                    timeout: std::time::Duration::from_millis(50),
-                    ..Default::default()
-                };
-                ratatui_image::picker::Picker::from_query_stdio_with_options(options).ok()
+                if cfg!(test) || std::env::var("TERM_PROGRAM").ok().as_deref() == Some("Apple_Terminal") {
+                    None
+                } else {
+                    let options = ratatui_image::picker::cap_parser::QueryStdioOptions {
+                        timeout: std::time::Duration::from_millis(50),
+                        ..Default::default()
+                    };
+                    ratatui_image::picker::Picker::from_query_stdio_with_options(options).ok()
+                }
             },
+            viewer_image_protocol: None,
         }
     }
 
@@ -936,12 +942,7 @@ impl App {
                                     protocol_opt = Some(fallback.new_resize_protocol(dyn_img));
                                 }
                                 if let Some(protocol) = protocol_opt {
-                                    self.preview_state = PreviewState::ReadyImage {
-                                        path: res.path.clone(),
-                                        width: res.width,
-                                        height: res.height,
-                                        protocol,
-                                    };
+                                    self.viewer_image_protocol = Some(protocol);
                                     got_any = true;
                                 }
                             }
@@ -1011,9 +1012,14 @@ async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> PreviewCon
     if ["png", "jpg", "jpeg", "gif", "webp", "bmp"].contains(&ext.as_str()) {
         let path_clone = path.to_path_buf();
         if let Ok(img) = tokio::task::spawn_blocking(move || {
-            image::open(&path_clone)
+            if let Ok(raw_img) = image::open(&path_clone) {
+                // Downsample large images in background thread to prevent UI lag/freeze during protocol rendering
+                Some(raw_img.thumbnail(1200, 1200))
+            } else {
+                None
+            }
         }).await {
-            if let Ok(dyn_img) = img {
+            if let Some(dyn_img) = img {
                 return PreviewContent::Image(dyn_img);
             }
         }
@@ -1062,6 +1068,7 @@ async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> PreviewCon
     }
 
     pub fn open_viewer(&mut self, path: PathBuf) {
+        self.viewer_image_protocol = None;
         self.dialog = Dialog::ViewFile {
             path: path.clone(),
             content: "\n  Loading preview...".to_string(),

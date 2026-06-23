@@ -558,14 +558,12 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             let is_image = ["png", "jpg", "jpeg", "gif", "webp", "bmp"].contains(&ext.as_str());
 
             if is_image {
-                if let PreviewState::ReadyImage { path: img_path, protocol, .. } = &mut app.preview_state {
-                    if img_path == path {
-                        let inner_area = block.inner(area);
-                        f.render_widget(block, area);
-                        let stateful_image = ratatui_image::StatefulImage::default().resize(ratatui_image::Resize::Fit(None));
-                        f.render_stateful_widget(stateful_image, inner_area, protocol);
-                        return;
-                    }
+                if let Some(protocol) = &mut app.viewer_image_protocol {
+                    let inner_area = block.inner(area);
+                    f.render_widget(block, area);
+                    let stateful_image = ratatui_image::StatefulImage::default().resize(ratatui_image::Resize::Fit(None));
+                    f.render_stateful_widget(stateful_image, inner_area, protocol);
+                    return;
                 }
             }
 
