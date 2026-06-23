@@ -1498,7 +1498,29 @@ fn draw_panel(f: &mut Frame, area: Rect, panel: &mut Panel, role: PaneRole, them
         return;
     }
 
+    let total_items = panel.items.len();
+    let display_height = area.height.saturating_sub(2) as usize;
+    let current_offset = panel.scroll_state.offset();
+
+    let mut offset = current_offset;
+    if let Some(selected) = panel.scroll_state.selected() {
+        if selected < offset {
+            offset = selected;
+        } else if selected >= offset + display_height {
+            offset = selected.saturating_sub(display_height).saturating_add(1);
+        }
+    }
+    let max_offset = total_items.saturating_sub(display_height);
+    if offset > max_offset {
+        offset = max_offset;
+    }
+    *panel.scroll_state.offset_mut() = offset;
+
     let list_items: Vec<ListItem> = panel.items.iter().enumerate().map(|(idx, item)| {
+        if idx < offset || idx >= offset + display_height {
+            return ListItem::new("");
+        }
+
         let is_selected = Some(idx) == panel.scroll_state.selected();
         let is_marked = panel.marked.contains(&item.path);
 
@@ -1639,7 +1661,28 @@ fn draw_tree_panel(f: &mut Frame, area: Rect, app: &mut App, is_active: bool, th
         return;
     }
 
+    let total_items = app.tree_nodes.len();
+    let display_height = area.height.saturating_sub(2) as usize;
+    let current_offset = app.tree_state.offset();
+
+    let mut offset = current_offset;
+    let sel = app.tree_selected;
+    if sel < offset {
+        offset = sel;
+    } else if sel >= offset + display_height {
+        offset = sel.saturating_sub(display_height).saturating_add(1);
+    }
+    let max_offset = total_items.saturating_sub(display_height);
+    if offset > max_offset {
+        offset = max_offset;
+    }
+    *app.tree_state.offset_mut() = offset;
+
     let list_items: Vec<ListItem> = app.tree_nodes.iter().enumerate().map(|(idx, node)| {
+        if idx < offset || idx >= offset + display_height {
+            return ListItem::new("");
+        }
+
         let is_selected = idx == app.tree_selected;
         
         let indent = "  ".repeat(node.depth);
@@ -1676,7 +1719,6 @@ fn draw_tree_panel(f: &mut Frame, area: Rect, app: &mut App, is_active: bool, th
         ListItem::new(line).style(item_style)
     }).collect();
 
-    let sel = app.tree_selected;
     app.tree_state.select(Some(sel));
 
     let list = List::new(list_items)
