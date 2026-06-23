@@ -53,6 +53,9 @@ The navigation controls dynamically adapt depending on whether you are using **S
 | **Ctrl + S** | **o** | Open **Settings/Configuration** overlay |
 | **Ctrl + O** | **Ctrl + O** | Open **Terminal Overlay** (streaming command output) |
 | **Ctrl + B** | **Ctrl + B** | Open **Bookmarks**; **Ctrl + D** bookmarks the current folder |
+| **Ctrl + F** | **Ctrl + F** | Fuzzy Find files recursively in the active directory (uses `fd` + `fzf`) |
+| **Ctrl + G** | **Ctrl + G** | Live Grep text recursively in the active directory (uses `rg` + `fzf`) |
+| **Ctrl + J** | **Ctrl + J** | Jump to any directory using `zoxide` history database |
 | **Ctrl + U** | **Ctrl + U** | Swap the left and right panel directories |
 | **=** | **=** | Sync the inactive panel to the active panel's directory |
 | **Ctrl + Y** | **Ctrl + Y** | Copy the active panel path to the clipboard |
@@ -159,6 +162,28 @@ Settings are loaded automatically at startup and saved to:
 - `default_editor`: system command to open files (e.g. `nano`, `vim`, `code`)
 
 Press **Ctrl+S** (or **o** in Vim mode) to open the interactive settings dialog. Use **Up/Down** to navigate rows, **Space** to toggle settings, and **Enter** to save changes to disk.
+
+---
+
+## 🔍 External CLI Tools Integration
+
+`rc` provides first-class integrations with popular CLI search and navigation tools. These commands run interactively in the foreground and immediately apply their selection back to the file manager:
+
+*   **Fuzzy Find Files (`Ctrl+F`)**: Recursively finds files in the active directory using `fd` (or fallbacks) and `fzf`. Selecting a file highlights and positions the cursor on it in `rc`.
+*   **Live Grep Text (`Ctrl+G`)**: Greps files recursively in the active directory using `rg` and `fzf`. Selecting a search result navigates to and highlights the target file.
+*   **Zoxide Jump (`Ctrl+J`)**: Opens interactive database navigation using `zoxide query -i`. Selecting a directory jumps the active panel to that folder.
+
+> [!NOTE]
+> Make sure `fzf`, `fd`/`find`, `rg`, and/or `zoxide` are installed and available in your shell's `PATH`.
+
+---
+
+## 🎨 Native Previews & Rendering
+
+*   **Syntax Highlighting**: Code and config files are natively highlighted inside the preview window using `syntect` with a pure-Rust background parser (compiled using `regex-fancy` for build compatibility). Highlighting states are lazy-loaded to ensure zero application startup latency.
+*   **Pixel-Perfect Image Preview**: Renders PNG, JPG, GIF, WebP, and other formats directly inside the terminal preview panel using `ratatui-image`. Automatically uses the best available protocol for your terminal (Kitty Graphics Protocol, Sixel, or half-blocks fallback).
+*   **Virtual Scroll Rendering**: Snappy performance even in directories with 10k+ files. `rc` uses viewport-based list virtualization so only visible files are formatted, styled, canonicalized, or checked for Git statuses.
+*   **Debounced File Watcher**: A built-in filesystem event watcher debounces multiple updates in quick succession, preventing rendering floods during batch operations.
 
 ---
 
