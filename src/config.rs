@@ -41,6 +41,9 @@ pub struct Keymap {
     pub tab: Vec<(KeyCode, KeyModifiers)>,
     pub tab_prev: Vec<(KeyCode, KeyModifiers)>,
     pub pin_target: Vec<(KeyCode, KeyModifiers)>,
+    pub fuzzy_find: Vec<(KeyCode, KeyModifiers)>,
+    pub live_grep: Vec<(KeyCode, KeyModifiers)>,
+    pub zoxide_jump: Vec<(KeyCode, KeyModifiers)>,
 }
 
 impl Keymap {
@@ -65,6 +68,9 @@ impl Keymap {
             tab: vec![(KeyCode::Tab, KeyModifiers::empty())],
             tab_prev: vec![(KeyCode::BackTab, KeyModifiers::empty())],
             pin_target: vec![(KeyCode::Char('t'), KeyModifiers::empty())],
+            fuzzy_find: vec![(KeyCode::Char('f'), KeyModifiers::CONTROL)],
+            live_grep: vec![(KeyCode::Char('g'), KeyModifiers::CONTROL)],
+            zoxide_jump: vec![(KeyCode::Char('j'), KeyModifiers::CONTROL)],
         }
     }
 
