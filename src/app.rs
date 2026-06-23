@@ -32,6 +32,10 @@ pub struct App {
     pub focus: PanelId,
     /// The "other" panel — copy/move destination and sync/swap partner.
     pub partner: PanelId,
+    /// When true, `partner` is a user-pinned copy/move target and is NOT
+    /// auto-reassigned on focus changes. Lets the user aim the destination
+    /// explicitly when 3+ panes are open.
+    pub target_pinned: bool,
     /// Tiling split tree over panel ids.
     pub root: Node,
     /// Leaf screen rectangles from the last render, for mouse hit-testing.
@@ -81,6 +85,7 @@ impl App {
             panels: vec![Some(left), Some(right)],
             focus: 0,
             partner: 1,
+            target_pinned: false,
             root,
             leaf_rects: Vec::new(),
             dialog: Dialog::None,
@@ -226,15 +231,39 @@ impl App {
         }
     }
 
-    /// Keep `partner` a valid live leaf distinct from `focus` where possible.
+    /// Keep `partner` a valid live leaf. When the partner is a user-pinned
+    /// target we keep it even if it equals focus; otherwise we ensure it is
+    /// distinct from focus where possible. A pinned target that no longer
+    /// exists (its pane was closed) is silently unpinned.
     fn ensure_partner(&mut self) {
         let leaves = self.root.leaves();
-        if !leaves.contains(&self.partner) || self.partner == self.focus {
+        if !leaves.contains(&self.partner) {
+            self.target_pinned = false;
+        }
+        if !leaves.contains(&self.partner) || (!self.target_pinned && self.partner == self.focus) {
             self.partner = leaves
                 .iter()
                 .copied()
                 .find(|&l| l != self.focus)
                 .unwrap_or(self.focus);
+        }
+    }
+
+    /// Pin (or unpin) the focused pane as the sticky copy/move target.
+    /// Re-pinning the already-pinned pane clears the pin.
+    pub fn toggle_target_pin(&mut self) {
+        if self.root.leaves().len() <= 1 {
+            self.status_message = "Need at least two panes to pin a target".to_string();
+            return;
+        }
+        if self.target_pinned && self.partner == self.focus {
+            self.target_pinned = false;
+            self.ensure_partner();
+            self.status_message = "Target unpinned".to_string();
+        } else {
+            self.partner = self.focus;
+            self.target_pinned = true;
+            self.status_message = format!("Target pinned: {}", self.get_active_panel().path.display());
         }
     }
 
@@ -249,7 +278,9 @@ impl App {
         let new_panel = Panel::new(path, show_hidden, sort_by);
         let id = self.alloc_panel(new_panel);
         self.root.split_leaf(self.focus, id, dir);
-        self.partner = self.focus;
+        if !self.target_pinned {
+            self.partner = self.focus;
+        }
         self.focus = id;
         self.status_message = format!(
             "Split {} — {} panes",
@@ -275,7 +306,8 @@ impl App {
         }
     }
 
-    /// Cycle focus to the next pane (Tab). Records the previous as partner.
+    /// Cycle focus to the next pane (Tab). Records the previous as partner
+    /// unless a target is pinned.
     pub fn focus_next(&mut self) {
         let leaves = self.root.leaves();
         if leaves.len() <= 1 {
@@ -283,8 +315,25 @@ impl App {
         }
         let pos = leaves.iter().position(|&l| l == self.focus).unwrap_or(0);
         let next = leaves[(pos + 1) % leaves.len()];
-        self.partner = self.focus;
+        if !self.target_pinned {
+            self.partner = self.focus;
+        }
         self.focus = next;
+    }
+
+    /// Cycle focus to the previous pane (Shift+Tab). Records the previous as
+    /// partner unless a target is pinned.
+    pub fn focus_prev(&mut self) {
+        let leaves = self.root.leaves();
+        if leaves.len() <= 1 {
+            return;
+        }
+        let pos = leaves.iter().position(|&l| l == self.focus).unwrap_or(0);
+        let prev = leaves[(pos + leaves.len() - 1) % leaves.len()];
+        if !self.target_pinned {
+            self.partner = self.focus;
+        }
+        self.focus = prev;
     }
 
     /// Focus the first (top-left) pane; used when entering tree mode.
@@ -308,7 +357,9 @@ impl App {
     /// Focus a specific pane id (mouse click). Records previous as partner.
     pub fn focus_panel(&mut self, id: PanelId) {
         if id != self.focus && self.root.contains(id) {
-            self.partner = self.focus;
+            if !self.target_pinned {
+                self.partner = self.focus;
+            }
             self.focus = id;
         }
     }

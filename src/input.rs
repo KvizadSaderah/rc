@@ -1285,6 +1285,10 @@ fn handle_main_keys<B: ratatui::backend::Backend>(app: &mut App, key: KeyEvent, 
         }
     } else if matches_key(&key, &keys.tab) {
         app.toggle_panel();
+    } else if matches_key(&key, &keys.tab_prev) {
+        app.focus_prev();
+    } else if matches_key(&key, &keys.pin_target) {
+        app.toggle_target_pin();
     } else {
         // Fallback controls
         match key.code {
