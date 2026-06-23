@@ -136,6 +136,44 @@ pub fn run_foreground(cmd: &str, dir: &Path) -> io::Result<ExitStatus> {
     result
 }
 
+/// Run an interactive command (like fzf) and capture its stdout.
+/// Stdin and Stderr are redirected to /dev/tty so the interactive UI works.
+pub fn run_interactive_capture(cmd: &str, dir: &Path) -> io::Result<Option<String>> {
+    #[cfg(unix)]
+    {
+        let tty_in = std::fs::OpenOptions::new().read(true).open("/dev/tty")?;
+        let tty_out = std::fs::OpenOptions::new().write(true).open("/dev/tty")?;
+
+        suspend();
+        let output = build(cmd, dir)
+            .stdin(Stdio::from(tty_in))
+            .stdout(Stdio::piped())
+            .stderr(Stdio::from(tty_out))
+            .output();
+        resume();
+
+        match output {
+            Ok(out) => {
+                if out.status.success() {
+                    let selected = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !selected.is_empty() {
+                        return Ok(Some(selected));
+                    }
+                }
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = cmd;
+        let _ = dir;
+        Ok(None)
+    }
+}
+
+
 /// Spawn a command with piped stdout/stderr for streaming. stdin is null so a
 /// program that unexpectedly wants a TTY exits promptly instead of hanging.
 pub fn spawn_piped(cmd: &str, dir: &Path) -> io::Result<Child> {

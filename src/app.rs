@@ -1721,6 +1721,100 @@ pub fn execute_menu_action<B: ratatui::backend::Backend>(app: &mut App, menu_idx
     }
 }
 
+impl App {
+    pub fn trigger_fuzzy_find(&mut self) {
+        let dir = self.get_active_panel().path.clone();
+        let cmd = "fd --type f --hidden --exclude .git 2>/dev/null | fzf --height 40% --layout=reverse --border";
+        let cmd_to_run = if std::process::Command::new("fd").arg("--version").output().is_ok() {
+            cmd.to_string()
+        } else {
+            "find . -type f -not -path '*/.*' 2>/dev/null | fzf --height 40% --layout=reverse --border".to_string()
+        };
+
+        if std::process::Command::new("fzf").arg("--version").output().is_err() {
+            self.status_message = "Error: 'fzf' is not installed. Install it to use fuzzy find (e.g. 'brew install fzf').".to_string();
+            return;
+        }
+
+        match crate::shell::run_interactive_capture(&cmd_to_run, &dir) {
+            Ok(Some(selected)) => {
+                let absolute_path = dir.join(selected);
+                if absolute_path.exists() {
+                    let panel = self.get_active_panel_mut();
+                    if let Some(parent) = absolute_path.parent() {
+                        let _ = panel.set_path(parent.to_path_buf());
+                        panel.select_item_by_path(&absolute_path);
+                        self.status_message = format!("Found: {}", absolute_path.file_name().unwrap_or_default().to_string_lossy());
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                self.status_message = format!("Fuzzy find failed: {}", e);
+            }
+        }
+    }
+
+    pub fn trigger_live_grep(&mut self) {
+        let dir = self.get_active_panel().path.clone();
+        if std::process::Command::new("rg").arg("--version").output().is_err() {
+            self.status_message = "Error: 'rg' (ripgrep) is not installed. Install it for live grep.".to_string();
+            return;
+        }
+        if std::process::Command::new("fzf").arg("--version").output().is_err() {
+            self.status_message = "Error: 'fzf' is not installed. Install it for live grep.".to_string();
+            return;
+        }
+
+        let cmd = "rg --line-number --column --no-heading --color=always --smart-case '' 2>/dev/null | fzf --ansi --height 40% --layout=reverse --border --delimiter : --preview 'bat --color=always --style=plain --highlight-line {2} {1} 2>/dev/null || cat {1}'";
+        match crate::shell::run_interactive_capture(cmd, &dir) {
+            Ok(Some(selected)) => {
+                let parts: Vec<&str> = selected.split(':').collect();
+                if !parts.is_empty() {
+                    let relative_path = parts[0];
+                    let absolute_path = dir.join(relative_path);
+                    if absolute_path.exists() {
+                        let panel = self.get_active_panel_mut();
+                        if let Some(parent) = absolute_path.parent() {
+                            let _ = panel.set_path(parent.to_path_buf());
+                            panel.select_item_by_path(&absolute_path);
+                            self.status_message = format!("Jumped to: {}", relative_path);
+                        }
+                    }
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                self.status_message = format!("Live grep failed: {}", e);
+            }
+        }
+    }
+
+    pub fn trigger_zoxide_jump(&mut self) {
+        let dir = self.get_active_panel().path.clone();
+        if std::process::Command::new("zoxide").arg("--version").output().is_err() {
+            self.status_message = "Error: 'zoxide' is not installed. Install it for interactive jumping.".to_string();
+            return;
+        }
+
+        let cmd = "zoxide query -i";
+        match crate::shell::run_interactive_capture(cmd, &dir) {
+            Ok(Some(selected)) => {
+                let path = PathBuf::from(selected);
+                if path.exists() {
+                    let panel = self.get_active_panel_mut();
+                    let _ = panel.set_path(path.clone());
+                    self.status_message = format!("Jumped to: {}", path.display());
+                }
+            }
+            Ok(None) => {}
+            Err(e) => {
+                self.status_message = format!("Zoxide jump failed: {}", e);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

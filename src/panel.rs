@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use ratatui::widgets::ListState;
 
@@ -234,6 +234,13 @@ impl Panel {
 
     pub fn get_selected_item(&self) -> Option<&FileItem> {
         self.items.get(self.selected)
+    }
+
+    pub fn select_item_by_path(&mut self, path: &Path) {
+        if let Some(pos) = self.items.iter().position(|item| item.path == path) {
+            self.selected = pos;
+            self.scroll_state.select(Some(self.selected));
+        }
     }
 }
 

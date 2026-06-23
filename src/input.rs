@@ -1170,6 +1170,12 @@ fn handle_main_keys<B: ratatui::backend::Backend>(app: &mut App, key: KeyEvent, 
         };
     } else if key.code == KeyCode::Char('s') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.dialog = Dialog::Settings { active_row: 0 };
+    } else if matches_key(&key, &keys.fuzzy_find) {
+        app.trigger_fuzzy_find();
+    } else if matches_key(&key, &keys.live_grep) {
+        app.trigger_live_grep();
+    } else if matches_key(&key, &keys.zoxide_jump) {
+        app.trigger_zoxide_jump();
     } else if key.code == KeyCode::Char('b') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.dialog = Dialog::Bookmarks { selected_idx: 0 };
     } else if key.code == KeyCode::Char('d') && key.modifiers.contains(KeyModifiers::CONTROL) {
