@@ -16,7 +16,7 @@ ratatui = "0.30.2"
 tokio = { version = "1.43.0", features = ["full"] }
 trash = "5.2.6"
 syntect = { version = "5.2.0", default-features = false, features = ["parsing", "default-syntaxes", "default-themes", "regex-fancy", "fancy-regex"] }
-ratatui-image = "11.0.4"
+ratatui-image = { version = "11.0.4", default-features = false, features = ["image-defaults", "crossterm"] }
 image = "0.25.5"
 
 

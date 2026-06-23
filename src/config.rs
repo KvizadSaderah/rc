@@ -18,6 +18,7 @@ pub struct Config {
     pub use_trash: bool,       // send deletes to OS trash instead of permanent removal
     pub use_nerd_fonts: bool,
     pub split_editor: bool,
+    pub image_preview_protocol: String, // "auto", "kitty", "iterm2", "sixel", "halfblocks", "none"
 }
 
 #[derive(Clone, Debug)]
@@ -106,6 +107,7 @@ pub fn load_config() -> Config {
         use_trash: true,
         use_nerd_fonts: true,
         split_editor: false,
+        image_preview_protocol: "auto".to_string(),
     };
 
     if let Some(path) = get_config_path() {
@@ -129,6 +131,7 @@ pub fn load_config() -> Config {
                         "use_trash" => config.use_trash = parts[1] == "true",
                         "use_nerd_fonts" => config.use_nerd_fonts = parts[1] == "true",
                         "split_editor" => config.split_editor = parts[1] == "true",
+                        "image_preview_protocol" => config.image_preview_protocol = parts[1].to_string(),
                         "bookmarks" => {
                             config.bookmarks = parts[1]
                                 .split(',')
@@ -169,6 +172,7 @@ pub fn save_config(config: &Config) -> io::Result<()> {
              use_trash = {}\n\
              use_nerd_fonts = {}\n\
              split_editor = {}\n\
+             image_preview_protocol = {}\n\
              bookmarks = {}\n\n\
              [keys]\n\
              ; Customize shortcuts here. Format: command = key, modifiers+key\n\
@@ -182,7 +186,7 @@ pub fn save_config(config: &Config) -> io::Result<()> {
              ; toggle_hidden = .\n\
              ; toggle_preview = ctrl+p\n\
              ; select_item = space\n",
-            config.show_hidden, config.sort_by, config.keybindings, config.default_editor, config.editor_mode, config.confirm_quit, config.theme, config.border_type, config.use_trash, config.use_nerd_fonts, config.split_editor, bookmarks_str
+            config.show_hidden, config.sort_by, config.keybindings, config.default_editor, config.editor_mode, config.confirm_quit, config.theme, config.border_type, config.use_trash, config.use_nerd_fonts, config.split_editor, config.image_preview_protocol, bookmarks_str
         );
         fs::write(path, content)?;
     }
