@@ -554,13 +554,12 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 .border_style(Style::default().fg(border_color))
                 .bg(theme.status_bg);
 
-            let lines: Vec<&str> = content.lines().collect();
+            let parsed_lines = parse_ansi_text(content);
             let visible_lines = area.height.saturating_sub(2) as usize;
-            let display_lines = lines
-                .iter()
+            let display_lines = parsed_lines
+                .into_iter()
                 .skip(*scroll_offset)
                 .take(visible_lines)
-                .map(|&s| Line::from(s))
                 .collect::<Vec<Line>>();
 
             let para = Paragraph::new(display_lines)
@@ -1898,5 +1897,23 @@ fn map_ansi_color_code(code: u8, bright: bool) -> Color {
         (7, false) => Color::Gray,
         (7, true) => Color::White,
         _ => Color::Reset,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_ansi_text() {
+        let input = "\x1b[48;2;43;48;59m\x1b[38;2;180;142;173mimport\x1b[0m";
+        let parsed = parse_ansi_text(input);
+        assert_eq!(parsed.len(), 1);
+        let line = &parsed[0];
+        assert_eq!(line.spans.len(), 1, "expected 1 span, got {:?}", line.spans);
+        let span = &line.spans[0];
+        assert_eq!(span.content, "import");
+        assert_eq!(span.style.fg, Some(Color::Rgb(180, 142, 173)));
+        assert_eq!(span.style.bg, Some(Color::Rgb(43, 48, 59)));
     }
 }
