@@ -895,15 +895,16 @@ impl App {
                     }
                 }
                 PreviewContent::Image(dyn_img) => {
-                    if let PreviewState::Loading { ref path, width, height } = self.preview_state {
-                        if path == &res.path && width == res.width && height == res.height {
+                    let mut updated = false;
+                    if let PreviewState::Loading { ref path, .. } = self.preview_state {
+                        if path == &res.path {
                             let mut protocol_opt = None;
                             if let Some(ref mut picker) = self.image_picker {
                                 protocol_opt = Some(picker.new_resize_protocol(dyn_img.clone()));
                             }
                             if protocol_opt.is_none() {
                                 let fallback = ratatui_image::picker::Picker::halfblocks();
-                                protocol_opt = Some(fallback.new_resize_protocol(dyn_img));
+                                protocol_opt = Some(fallback.new_resize_protocol(dyn_img.clone()));
                             }
                             if let Some(protocol) = protocol_opt {
                                 self.preview_state = PreviewState::ReadyImage {
@@ -913,6 +914,30 @@ impl App {
                                     protocol,
                                 };
                                 got_any = true;
+                                updated = true;
+                            }
+                        }
+                    }
+                    if !updated {
+                        if let Dialog::ViewFile { ref path, .. } = self.dialog {
+                            if path == &res.path {
+                                let mut protocol_opt = None;
+                                if let Some(ref mut picker) = self.image_picker {
+                                    protocol_opt = Some(picker.new_resize_protocol(dyn_img.clone()));
+                                }
+                                if protocol_opt.is_none() {
+                                    let fallback = ratatui_image::picker::Picker::halfblocks();
+                                    protocol_opt = Some(fallback.new_resize_protocol(dyn_img));
+                                }
+                                if let Some(protocol) = protocol_opt {
+                                    self.preview_state = PreviewState::ReadyImage {
+                                        path: res.path.clone(),
+                                        width: res.width,
+                                        height: res.height,
+                                        protocol,
+                                    };
+                                    got_any = true;
+                                }
                             }
                         }
                     }

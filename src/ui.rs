@@ -554,6 +554,21 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 .border_style(Style::default().fg(border_color))
                 .bg(theme.status_bg);
 
+            let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+            let is_image = ["png", "jpg", "jpeg", "gif", "webp", "bmp"].contains(&ext.as_str());
+
+            if is_image {
+                if let PreviewState::ReadyImage { path: img_path, protocol, .. } = &mut app.preview_state {
+                    if img_path == path {
+                        let inner_area = block.inner(area);
+                        f.render_widget(block, area);
+                        let stateful_image = ratatui_image::StatefulImage::default().resize(ratatui_image::Resize::Fit(None));
+                        f.render_stateful_widget(stateful_image, inner_area, protocol);
+                        return;
+                    }
+                }
+            }
+
             let parsed_lines = parse_ansi_text(content);
             let visible_lines = area.height.saturating_sub(2) as usize;
             let display_lines = parsed_lines
