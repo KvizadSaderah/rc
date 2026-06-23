@@ -168,7 +168,13 @@ impl App {
             preview_scroll_offset: 0,
             fs_job: None,
             write_last_dir,
-            image_picker: ratatui_image::picker::Picker::from_query_stdio().ok(),
+            image_picker: {
+                let options = ratatui_image::picker::cap_parser::QueryStdioOptions {
+                    timeout: std::time::Duration::from_millis(50),
+                    ..Default::default()
+                };
+                ratatui_image::picker::Picker::from_query_stdio_with_options(options).ok()
+            },
         }
     }
 
