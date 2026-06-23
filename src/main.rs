@@ -73,33 +73,18 @@ fn print_help() {
 fn self_update() -> Result<(), Box<dyn std::error::Error>> {
     println!("\x1b[1;36m▶ Checking for updates...\x1b[0m");
 
-    // Use GITHUB_TOKEN if set to avoid anonymous API rate limits (60 req/hr per IP)
-    let token = std::env::var("GITHUB_TOKEN").ok();
-    let mut curl_args = vec!["-s".to_string()];
-    if let Some(ref t) = token {
-        curl_args.push("-H".to_string());
-        curl_args.push(format!("Authorization: Bearer {t}"));
-    }
-    curl_args.push(format!("https://api.github.com/repos/{REPO}/releases/latest"));
-
+    let url = format!("https://github.com/{REPO}/releases/latest");
     let output = Command::new("curl")
-        .args(&curl_args)
+        .args(["-Ls", "-o", "/dev/null", "-w", "%{url_effective}", &url])
         .output()?;
 
     let body = String::from_utf8_lossy(&output.stdout);
 
-    if body.contains("rate limit exceeded") {
-        println!("\x1b[31m✗ GitHub API rate limit exceeded.\x1b[0m");
-        println!("  Set GITHUB_TOKEN env var to increase the limit:");
-        println!("  \x1b[36mexport GITHUB_TOKEN=your_token\x1b[0m");
-        return Ok(());
-    }
-
     let remote_tag = body
-        .split("\"tag_name\"")
+        .split("/tag/")
         .nth(1)
-        .and_then(|s| s.split('"').nth(1))
         .unwrap_or("")
+        .trim()
         .trim_start_matches('v');
 
     if remote_tag.is_empty() {
