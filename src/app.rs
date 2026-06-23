@@ -9,7 +9,7 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::Terminal;
 
 use crate::config::*;
 use crate::fileops::{self, JobState, OpKind};
@@ -48,7 +48,9 @@ pub struct App {
     /// Persistent list state for the tree pane so its scroll offset survives
     /// across frames (needed for correct mouse hit-testing).
     pub tree_state: ListState,
-    pub preview_cache: Option<PreviewCache>,
+    pub preview_state: PreviewState,
+    pub preview_tx: std::sync::mpsc::Sender<PreviewResult>,
+    pub preview_rx: std::sync::mpsc::Receiver<PreviewResult>,
     pub running_process: Option<RunningProcess>,
     pub preview_scroll_offset: usize,
     pub fs_job: Option<JobState>,
@@ -74,6 +76,7 @@ impl App {
         let right = Panel::new(current_dir, config.show_hidden, config.sort_by.clone());
         let mut root = Node::leaf(0);
         root.split_leaf(0, 1, Dir::Horizontal);
+        let (preview_tx, preview_rx) = std::sync::mpsc::channel();
         Self {
             panels: vec![Some(left), Some(right)],
             focus: 0,
@@ -90,7 +93,9 @@ impl App {
             tree_nodes: Vec::new(),
             tree_selected: 0,
             tree_state: ListState::default(),
-            preview_cache: None,
+            preview_state: PreviewState::None,
+            preview_tx,
+            preview_rx,
             running_process: None,
             preview_scroll_offset: 0,
             fs_job: None,
@@ -709,7 +714,7 @@ impl App {
         self.running_process = None;
     }
 
-    pub fn handle_enter_or_right(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, is_enter: bool) {
+    pub fn handle_enter_or_right<B: ratatui::backend::Backend>(&mut self, terminal: &mut Terminal<B>, is_enter: bool) {
         let selected_item = {
             let panel = self.get_active_panel();
             panel.get_selected_item().cloned()
@@ -725,20 +730,7 @@ impl App {
                 }
             } else if item.path.is_file() {
                 if is_enter {
-                    // Open in external editor (nvim/vim/nano — whatever is configured)
-                    match edit_file(&item.path, &self.config.default_editor) {
-                        Ok(_) => {
-                            self.status_message = format!("Edited: {}", item.name);
-                            self.refresh_panels();
-                            let _ = terminal.clear();
-                        }
-                        Err(e) => {
-                            let _ = terminal.clear();
-                            self.dialog = Dialog::Error {
-                                message: format!("Failed to open editor: {}", e),
-                            };
-                        }
-                    }
+                    self.open_editor(terminal);
                 } else {
                     self.status_message = "Press Enter to edit/open file".to_string();
                 }
@@ -758,98 +750,197 @@ impl App {
         }
     }
 
-    pub fn get_preview_content(&mut self, path: PathBuf, cols: u16, rows: u16) -> String {
-        if let Some(ref cache) = self.preview_cache
-            && cache.path == path && cache.width == cols && cache.height == rows {
-                return cache.content.clone();
+    /// Poll the channel for finished async previews.
+    /// Returns true if a preview finished loading (so the UI can be redrawn).
+    pub fn drain_previews(&mut self) -> bool {
+        let mut got_any = false;
+        while let Ok(res) = self.preview_rx.try_recv() {
+            // 1. Update preview_state (for quick-view pane)
+            if let PreviewState::Loading { ref path, width, height } = self.preview_state {
+                if path == &res.path && width == res.width && height == res.height {
+                    self.preview_state = PreviewState::Ready {
+                        path: res.path.clone(),
+                        width: res.width,
+                        height: res.height,
+                        content: res.content.clone(),
+                    };
+                    got_any = true;
+                }
             }
-        
-        let content = self.generate_preview_content(&path, cols, rows);
-        self.preview_cache = Some(PreviewCache {
-            path: path.clone(),
-            width: cols,
-            height: rows,
-            content: content.clone(),
-        });
-        content
-    }
-
-    fn generate_preview_content(&self, path: &Path, cols: u16, rows: u16) -> String {
-        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-        
-        // 1. Image previews via chafa
-        if ["png", "jpg", "jpeg", "gif", "webp", "bmp"].contains(&ext.as_str()) {
-            if let Ok(out) = std::process::Command::new("chafa")
-                .arg(format!("--size={}x{}", cols, rows))
-                .arg(path)
-                .output()
-                && out.status.success() {
-                    return String::from_utf8_lossy(&out.stdout).into_owned();
+            // 2. Update Dialog::ViewFile content (for split/fullscreen file viewer)
+            if let Dialog::ViewFile { path, content, .. } = &mut self.dialog {
+                if *path == res.path {
+                    *content = res.content.clone();
+                    got_any = true;
                 }
-            return format!(
-                "\n  [ Image Preview ]\n  File: {}\n\n  Tip: Install 'chafa' (e.g. 'brew install chafa')\n  for beautiful inline terminal image previews!",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            );
+            }
         }
-
-        // 2. Code previews via bat
-        let is_text = ["rs", "py", "js", "ts", "json", "toml", "md", "sh", "txt", "cfg", "ini", "yaml", "yml", "xml", "html", "css", "c", "cpp", "h", "go", "java"].contains(&ext.as_str());
-        if is_text
-            && let Ok(out) = std::process::Command::new("bat")
-                .arg("--color=always")
-                .arg("--style=plain")
-                .arg(format!("--terminal-width={}", cols))
-                .arg(path)
-                .output()
-                && out.status.success() {
-                    let raw_str = String::from_utf8_lossy(&out.stdout);
-                    let lines: Vec<&str> = raw_str.lines().take(rows as usize).collect();
-                    return lines.join("\n");
-                }
-
-        read_file_preview(path)
+        got_any
     }
+
+    pub fn get_preview_content(&mut self, path: PathBuf, cols: u16, rows: u16) -> String {
+        match &self.preview_state {
+            PreviewState::Ready { path: p, width: w, height: h, content }
+                if p == &path && *w == cols && *h == rows =>
+            {
+                content.clone()
+            }
+            PreviewState::Loading { path: p, width: w, height: h }
+                if p == &path && *w == cols && *h == rows =>
+            {
+                "\n  Loading preview...".to_string()
+            }
+            _ => {
+                // Either no preview or preview for a different file/size.
+                // Transition state to Loading and trigger the async generator task.
+                self.preview_state = PreviewState::Loading {
+                    path: path.clone(),
+                    width: cols,
+                    height: rows,
+                };
+                
+                let tx = self.preview_tx.clone();
+                let path_clone = path;
+                tokio::spawn(async move {
+                    let content = Self::generate_async_preview(&path_clone, cols, rows).await;
+                    let _ = tx.send(PreviewResult {
+                        path: path_clone,
+                        width: cols,
+                        height: rows,
+                        content,
+                    });
+                });
+                
+                "\n  Loading preview...".to_string()
+            }
+        }
+    }
+
+async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> String {
+    if path.is_dir() {
+        let path_clone = path.to_path_buf();
+        return tokio::task::spawn_blocking(move || {
+            read_dir_preview(&path_clone)
+        }).await.unwrap_or_else(|_| "Error loading directory preview".to_string());
+    }
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    
+    // 1. Image previews via chafa
+    if ["png", "jpg", "jpeg", "gif", "webp", "bmp"].contains(&ext.as_str()) {
+        let mut cmd = tokio::process::Command::new("chafa");
+        cmd.arg(format!("--size={}x{}", cols, rows)).arg(path);
+        if let Ok(out) = cmd.output().await {
+            if out.status.success() {
+                return String::from_utf8_lossy(&out.stdout).into_owned();
+            }
+        }
+        return format!(
+            "\n  [ Image Preview ]\n  File: {}\n\n  Tip: Install 'chafa' (e.g. 'brew install chafa')\n  for beautiful inline terminal image previews!",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        );
+    }
+
+    // 2. Code previews via bat
+    let is_text = ["rs", "py", "js", "ts", "json", "toml", "md", "sh", "txt", "cfg", "ini", "yaml", "yml", "xml", "html", "css", "c", "cpp", "h", "go", "java"].contains(&ext.as_str());
+    if is_text {
+        let mut cmd = tokio::process::Command::new("bat");
+        cmd.arg("--color=always")
+           .arg("--style=plain")
+           .arg(format!("--terminal-width={}", cols))
+           .arg(path);
+        if let Ok(out) = cmd.output().await {
+            if out.status.success() {
+                let raw_str = String::from_utf8_lossy(&out.stdout);
+                let lines: Vec<&str> = raw_str.lines().take(rows as usize).collect();
+                return lines.join("\n");
+            }
+        }
+    }
+
+    // 3. Fallback to standard text / hex preview (blocking thread pool spawn)
+    let path_clone = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        read_file_preview(&path_clone)
+    })
+    .await
+    .unwrap_or_else(|_| "Error generating preview".to_string())
+}
 
     // =========================================================================
     // Core Actions (View, Edit, Copy, Move, Mkdir, Delete) — Bulk selections aware!
     // =========================================================================
 
-    pub fn open_viewer(&mut self, path: PathBuf) {
-        let content = read_file_preview(&path);
-        self.dialog = Dialog::ViewFile {
-            path,
-            content,
-            scroll_offset: 0,
-        };
+    pub fn trigger_async_preview(&self, path: PathBuf, cols: u16, rows: u16) {
+        let tx = self.preview_tx.clone();
+        tokio::spawn(async move {
+            let content = Self::generate_async_preview(&path, cols, rows).await;
+            let _ = tx.send(PreviewResult {
+                path,
+                width: cols,
+                height: rows,
+                content,
+            });
+        });
     }
 
-    pub fn open_editor(&mut self) {
+    pub fn open_viewer(&mut self, path: PathBuf) {
+        self.dialog = Dialog::ViewFile {
+            path: path.clone(),
+            content: "\n  Loading preview...".to_string(),
+            scroll_offset: 0,
+            focused: true,
+        };
+        self.trigger_async_preview(path, 120, 40);
+    }
+
+    pub fn open_editor<B: ratatui::backend::Backend>(&mut self, terminal: &mut Terminal<B>) {
         let selected_path = self.get_active_panel().get_selected_item().map(|item| item.path.clone());
         if let Some(path) = selected_path {
             if path.is_file() {
-                // Always open built-in internal editor (F4)
-                // Use Enter for external editor (nvim/vim/nano)
-                match fs::read_to_string(&path) {
-                    Ok(content) => {
-                        let lines: Vec<String> = if content.is_empty() {
-                            vec![String::new()]
-                        } else {
-                            content.lines().map(|l| l.to_string()).collect()
-                        };
-                        self.dialog = Dialog::InternalEditor {
-                            file_path: path,
-                            lines,
-                            cursor_row: 0,
-                            cursor_col: 0,
-                            scroll_row: 0,
-                            scroll_col: 0,
-                            modified: false,
-                        };
+                if self.config.editor_mode == "external" {
+                    match edit_file_external(&path, &self.config.default_editor, self.config.split_editor) {
+                        Ok(is_split) => {
+                            self.status_message = if is_split {
+                                format!("Opened in split pane: {}", path.file_name().unwrap_or_default().to_string_lossy())
+                            } else {
+                                format!("Edited: {}", path.file_name().unwrap_or_default().to_string_lossy())
+                            };
+                            self.refresh_panels();
+                            if !is_split {
+                                let _ = terminal.clear();
+                            }
+                        }
+                        Err(e) => {
+                            let _ = terminal.clear();
+                            self.dialog = Dialog::Error {
+                                message: format!("Failed to open editor: {}", e),
+                            };
+                        }
                     }
-                    Err(e) => {
-                        self.dialog = Dialog::Error {
-                            message: format!("Cannot read file: {}", e),
-                        };
+                } else {
+                    // Open built-in internal editor (F4)
+                    match fs::read_to_string(&path) {
+                        Ok(content) => {
+                            let lines: Vec<String> = if content.is_empty() {
+                                vec![String::new()]
+                            } else {
+                                content.lines().map(|l| l.to_string()).collect()
+                            };
+                            self.dialog = Dialog::InternalEditor {
+                                file_path: path,
+                                lines,
+                                cursor_row: 0,
+                                cursor_col: 0,
+                                scroll_row: 0,
+                                scroll_col: 0,
+                                modified: false,
+                            };
+                        }
+                        Err(e) => {
+                            self.dialog = Dialog::Error {
+                                message: format!("Cannot read file: {}", e),
+                            };
+                        }
                     }
                 }
             } else {
@@ -860,7 +951,7 @@ impl App {
         }
     }
 
-    pub fn execute_shell_command(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, cmd: String) {
+    pub fn execute_shell_command<B: ratatui::backend::Backend>(&mut self, terminal: &mut Terminal<B>, cmd: String) {
         let trimmed = cmd.trim();
         if trimmed.is_empty() { return; }
 
@@ -1302,8 +1393,11 @@ fn format_permissions(mode: u32, is_dir: bool, is_symlink: bool) -> String {
 
 // Suspension editor helper
 pub fn edit_file(path: &Path, editor_bin: &str) -> io::Result<()> {
-    disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture, crossterm::cursor::Show)?;
+    let is_test = cfg!(test) || std::env::var("RC_TEST_MULTIPLEXER_BIN").is_ok();
+    if !is_test {
+        disable_raw_mode()?;
+        execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture, crossterm::cursor::Show)?;
+    }
     
     let mut child = std::process::Command::new(editor_bin)
         .arg(path)
@@ -1311,8 +1405,10 @@ pub fn edit_file(path: &Path, editor_bin: &str) -> io::Result<()> {
         
     let status = child.wait()?;
     
-    enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture, crossterm::cursor::Hide)?;
+    if !is_test {
+        enable_raw_mode()?;
+        execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture, crossterm::cursor::Hide)?;
+    }
     
     if !status.success() {
         return Err(io::Error::other(
@@ -1323,8 +1419,71 @@ pub fn edit_file(path: &Path, editor_bin: &str) -> io::Result<()> {
     Ok(())
 }
 
+// Spawns the editor in a split pane of tmux/wezterm/zellij if split layout is active,
+// otherwise suspends alternate screen and runs in foreground (blocking).
+pub fn edit_file_external(path: &Path, editor_bin: &str, split: bool) -> io::Result<bool> {
+    if split {
+        // 1. TMUX split
+        if std::env::var("TMUX").is_ok() {
+            let bin = std::env::var("RC_TEST_MULTIPLEXER_BIN").unwrap_or_else(|_| "tmux".to_string());
+            let mut cmd = std::process::Command::new(&bin);
+            cmd.arg("split-window")
+               .arg("-h")
+               .arg(editor_bin)
+               .arg(path);
+            if let Ok(mut child) = cmd.spawn() {
+                let _ = child.wait();
+                return Ok(true);
+            }
+        }
+
+        // 2. ZELLIJ pane
+        if std::env::var("ZELLIJ").is_ok() {
+            let bin = std::env::var("RC_TEST_MULTIPLEXER_BIN").unwrap_or_else(|_| "zellij".to_string());
+            let mut cmd = std::process::Command::new(&bin);
+            cmd.arg("edit")
+               .arg(path);
+            if let Ok(mut child) = cmd.spawn() {
+                let _ = child.wait();
+                return Ok(true);
+            }
+        }
+
+        // 3. WEZTERM split
+        if std::env::var("WEZTERM_PANE").is_ok() {
+            let bin = std::env::var("RC_TEST_MULTIPLEXER_BIN").unwrap_or_else(|_| {
+                let default_bin = "wezterm";
+                let has_in_path = if let Ok(paths) = std::env::var("PATH") {
+                    std::env::split_paths(&paths).any(|p| p.join(default_bin).exists())
+                } else {
+                    false
+                };
+                if !has_in_path && std::path::Path::new("/Applications/WezTerm.app/Contents/MacOS/wezterm").exists() {
+                    "/Applications/WezTerm.app/Contents/MacOS/wezterm".to_string()
+                } else {
+                    default_bin.to_string()
+                }
+            });
+            let mut cmd = std::process::Command::new(&bin);
+            cmd.arg("cli")
+               .arg("split-pane")
+               .arg("--")
+               .arg(editor_bin)
+               .arg(path);
+            if let Ok(mut child) = cmd.spawn() {
+                let _ = child.wait();
+                return Ok(true);
+            }
+        }
+    }
+
+    // Default fullscreen suspend-and-run
+    edit_file(path, editor_bin)?;
+    Ok(false)
+}
+
 // Menu dropdown actions router
-pub fn execute_menu_action(app: &mut App, menu_idx: usize, item_idx: usize, _terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
+pub fn execute_menu_action<B: ratatui::backend::Backend>(app: &mut App, menu_idx: usize, item_idx: usize, terminal: &mut Terminal<B>) {
     app.dialog = Dialog::None; // Close menu state
     match menu_idx {
         0 => { // Focused pane config (menu "Left")
@@ -1344,7 +1503,7 @@ pub fn execute_menu_action(app: &mut App, menu_idx: usize, item_idx: usize, _ter
                         && !item.is_dir { app.open_viewer(item.path); }
                 }
                 1 => {
-                    app.open_editor();
+                    app.open_editor(terminal);
                 }
                 2 => {
                     app.initiate_copy();
@@ -1502,5 +1661,27 @@ mod tests {
         app.close_focus(); // refuse
         assert_eq!(app.root.leaves().len(), 1);
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_edit_file_external_fallback() {
+        let path = std::path::PathBuf::from("nonexistent_test_file.txt");
+        let res = edit_file_external(&path, "invalid_editor_bin", false);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_edit_file_external_split_env() {
+        unsafe {
+            std::env::set_var("TMUX", "1");
+            std::env::set_var("RC_TEST_MULTIPLEXER_BIN", "true");
+        }
+        let path = std::path::PathBuf::from("nonexistent_test_file.txt");
+        let res = edit_file_external(&path, "true", true);
+        assert_eq!(res.ok(), Some(true));
+        unsafe {
+            std::env::remove_var("TMUX");
+            std::env::remove_var("RC_TEST_MULTIPLEXER_BIN");
+        }
     }
 }

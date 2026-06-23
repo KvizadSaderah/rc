@@ -16,6 +16,8 @@ pub struct Config {
     pub theme: String,
     pub border_type: String,   // "plain", "rounded", "thick", "double"
     pub use_trash: bool,       // send deletes to OS trash instead of permanent removal
+    pub use_nerd_fonts: bool,
+    pub split_editor: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -86,12 +88,14 @@ pub fn load_config() -> Config {
         sort_by: "name".to_string(),
         keybindings: "standard".to_string(),
         default_editor: env::var("EDITOR").unwrap_or_else(|_| "nvim".to_string()),
-        editor_mode: "internal".to_string(),
+        editor_mode: "external".to_string(),
         confirm_quit: true,
         bookmarks: Vec::new(),
         theme: "eve".to_string(),
         border_type: "plain".to_string(),
         use_trash: true,
+        use_nerd_fonts: true,
+        split_editor: false,
     };
 
     if let Some(path) = get_config_path() {
@@ -113,6 +117,8 @@ pub fn load_config() -> Config {
                         "theme" => config.theme = parts[1].to_string(),
                         "border_type" => config.border_type = parts[1].to_string(),
                         "use_trash" => config.use_trash = parts[1] == "true",
+                        "use_nerd_fonts" => config.use_nerd_fonts = parts[1] == "true",
+                        "split_editor" => config.split_editor = parts[1] == "true",
                         "bookmarks" => {
                             config.bookmarks = parts[1]
                                 .split(',')
@@ -151,6 +157,8 @@ pub fn save_config(config: &Config) -> io::Result<()> {
              theme = {}\n\
              border_type = {}\n\
              use_trash = {}\n\
+             use_nerd_fonts = {}\n\
+             split_editor = {}\n\
              bookmarks = {}\n\n\
              [keys]\n\
              ; Customize shortcuts here. Format: command = key, modifiers+key\n\
@@ -164,7 +172,7 @@ pub fn save_config(config: &Config) -> io::Result<()> {
              ; toggle_hidden = .\n\
              ; toggle_preview = ctrl+p\n\
              ; select_item = space\n",
-            config.show_hidden, config.sort_by, config.keybindings, config.default_editor, config.editor_mode, config.confirm_quit, config.theme, config.border_type, config.use_trash, bookmarks_str
+            config.show_hidden, config.sort_by, config.keybindings, config.default_editor, config.editor_mode, config.confirm_quit, config.theme, config.border_type, config.use_trash, config.use_nerd_fonts, config.split_editor, bookmarks_str
         );
         fs::write(path, content)?;
     }

@@ -21,7 +21,7 @@ use crate::ui::{ui, centered_rect};
 
 /// The workspace rectangle (between the 1-row header and the 2-row status/legend
 /// footer), matching the layout in `ui()`.
-fn workspace_area(terminal: &Terminal<CrosstermBackend<io::Stdout>>) -> Rect {
+fn workspace_area<B: ratatui::backend::Backend>(terminal: &Terminal<B>) -> Rect {
     let (w, h) = match terminal.size() {
         Ok(s) => (s.width, s.height),
         Err(_) => (80, 24),
@@ -57,6 +57,12 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
 
         // Drain progress from any running background filesystem job
         app.drain_fs_job();
+
+        // Drain loaded previews
+        if app.drain_previews() {
+            dirty = true;
+            dirty_since = std::time::Instant::now();
+        }
 
         let idle = matches!(app.dialog, Dialog::None) && !app.is_fs_busy();
 
@@ -225,8 +231,17 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
 
         let active_dir = app.get_active_panel().path.clone();
 
-        // Route key events depending on dialog state
-        match &mut app.dialog {
+        let is_view_file_unfocused = if let Dialog::ViewFile { focused: false, .. } = &app.dialog {
+            key.code != KeyCode::Esc && key.code != KeyCode::F(3) && key.code != KeyCode::Tab
+        } else {
+            false
+        };
+
+        if is_view_file_unfocused {
+            handle_main_keys(&mut app, key, terminal);
+        } else {
+            // Route key events depending on dialog state
+            match &mut app.dialog {
                 Dialog::None => handle_main_keys(&mut app, key, terminal),
                 Dialog::ConfirmDelete { item_path, .. } => {
                     let path = item_path.clone();
@@ -394,7 +409,7 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                             }
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
-                            if *active_row < 7 {
+                            if *active_row < 10 {
                                 *active_row += 1;
                             }
                         }
@@ -425,12 +440,18 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                                     app.config.default_editor = editors[(cur + 1) % editors.len()].to_string();
                                 }
                                 5 => {
+                                    app.config.editor_mode = match app.config.editor_mode.as_str() {
+                                        "internal" => "external".to_string(),
+                                        _ => "internal".to_string(),
+                                    };
+                                }
+                                6 => {
                                     let names = crate::theme::Theme::all_names();
                                     let cur = names.iter().position(|&n| n == app.config.theme).unwrap_or(0);
                                     app.config.theme = names[(cur + 1) % names.len()].to_string();
                                     app.apply_config();
                                 }
-                                6 => {
+                                7 => {
                                     app.config.border_type = match app.config.border_type.as_str() {
                                         "plain" => "rounded".to_string(),
                                         "rounded" => "thick".to_string(),
@@ -439,7 +460,14 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                                     };
                                     app.apply_config();
                                 }
-                                7 => {
+                                8 => {
+                                    app.config.use_nerd_fonts = !app.config.use_nerd_fonts;
+                                    app.apply_config();
+                                }
+                                9 => {
+                                    app.config.split_editor = !app.config.split_editor;
+                                }
+                                10 => {
                                     let _ = save_config(&app.config);
                                     app.apply_config();
                                     app.dialog = Dialog::None;
@@ -678,19 +706,29 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                     }
                 }
                 Dialog::InternalEditor { file_path, lines, cursor_row, cursor_col, scroll_row, scroll_col, modified } => {
-                    let editor_height = {
-                        let area = match terminal.size() {
-                            Ok(size) => centered_rect(95, 90, Rect::new(0, 0, size.width, size.height)),
-                            Err(_) => centered_rect(95, 90, Rect::new(0, 0, 80, 24)),
+                    let (editor_width, editor_height) = {
+                        let area = if app.config.split_editor && app.leaf_rects.len() > 1 {
+                            app.leaf_rects.iter()
+                                .find(|(id, _)| *id == app.partner)
+                                .map(|(_, r)| *r)
+                                .unwrap_or_else(|| {
+                                    let rect = match terminal.size() {
+                                        Ok(s) => Rect::new(0, 0, s.width, s.height),
+                                        Err(_) => Rect::new(0, 0, 80, 24),
+                                    };
+                                    centered_rect(95, 90, rect)
+                                })
+                        } else {
+                            let rect = match terminal.size() {
+                                Ok(s) => Rect::new(0, 0, s.width, s.height),
+                                Err(_) => Rect::new(0, 0, 80, 24),
+                            };
+                            centered_rect(95, 90, rect)
                         };
-                        area.height.saturating_sub(4) as usize
-                    };
-                    let editor_width = {
-                        let area = match terminal.size() {
-                            Ok(size) => centered_rect(95, 90, Rect::new(0, 0, size.width, size.height)),
-                            Err(_) => centered_rect(95, 90, Rect::new(0, 0, 80, 24)),
-                        };
-                        area.width.saturating_sub(8) as usize
+                        let line_num_width = format!("{}", lines.len()).len().max(3);
+                        let h = area.height.saturating_sub(2) as usize;
+                        let w = area.width.saturating_sub(2).saturating_sub(line_num_width as u16 + 2) as usize;
+                        (w, h)
                     };
 
                     let mut save_file = false;
@@ -922,29 +960,61 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                         }
                     }
                 }
-                Dialog::ViewFile { scroll_offset, content, .. } => {
+                Dialog::ViewFile { scroll_offset, content, focused, .. } => {
                     let lines_count = content.lines().count();
+                    let visible_lines = {
+                        let area = if app.config.split_editor && app.leaf_rects.len() > 1 {
+                            app.leaf_rects.iter()
+                                .find(|(id, _)| *id == app.partner)
+                                .map(|(_, r)| *r)
+                                .unwrap_or_else(|| {
+                                    let rect = match terminal.size() {
+                                        Ok(s) => Rect::new(0, 0, s.width, s.height),
+                                        Err(_) => Rect::new(0, 0, 80, 24),
+                                    };
+                                    centered_rect(90, 90, rect)
+                                })
+                        } else {
+                            let rect = match terminal.size() {
+                                Ok(s) => Rect::new(0, 0, s.width, s.height),
+                                Err(_) => Rect::new(0, 0, 80, 24),
+                            };
+                            centered_rect(90, 90, rect)
+                        };
+                        area.height.saturating_sub(2) as usize
+                    };
                     match key.code {
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            *scroll_offset = scroll_offset.saturating_sub(1);
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            if *scroll_offset + 5 < lines_count {
-                                *scroll_offset += 1;
-                            }
-                        }
-                        KeyCode::PageUp => {
-                            *scroll_offset = scroll_offset.saturating_sub(15);
-                        }
-                        KeyCode::PageDown => {
-                            if *scroll_offset + 15 < lines_count {
-                                *scroll_offset += 15;
-                            } else {
-                                *scroll_offset = lines_count.saturating_sub(5);
-                            }
-                        }
-                        KeyCode::Esc | KeyCode::Char('q') | KeyCode::F(3) => {
+                        KeyCode::Esc | KeyCode::F(3) => {
                             app.dialog = Dialog::None;
+                        }
+                        KeyCode::Tab => {
+                            *focused = !*focused;
+                        }
+                        _ if *focused => {
+                            match key.code {
+                                KeyCode::Char('q') => {
+                                    app.dialog = Dialog::None;
+                                }
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    *scroll_offset = scroll_offset.saturating_sub(1);
+                                }
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    if *scroll_offset + visible_lines < lines_count {
+                                        *scroll_offset += 1;
+                                    }
+                                }
+                                KeyCode::PageUp => {
+                                    *scroll_offset = scroll_offset.saturating_sub(visible_lines);
+                                }
+                                KeyCode::PageDown => {
+                                    if *scroll_offset + visible_lines < lines_count {
+                                        *scroll_offset += visible_lines;
+                                    } else {
+                                        *scroll_offset = lines_count.saturating_sub(visible_lines);
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
                         _ => {}
                     }
@@ -1000,6 +1070,7 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                     }
                 }
             }
+        }
 
         if app.should_quit {
             app.kill_running_process();
@@ -1011,7 +1082,7 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
 
 
 
-fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
+fn handle_main_keys<B: ratatui::backend::Backend>(app: &mut App, key: KeyEvent, terminal: &mut Terminal<B>) {
     let prev_state = app.focus_snapshot();
 
     let keys = &app.keymap;
@@ -1042,7 +1113,7 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
                 app.open_viewer(item.path);
             }
     } else if matches_key(&key, &keys.edit) {
-        app.open_editor();
+        app.open_editor(terminal);
     } else if matches_key(&key, &keys.copy) {
         app.initiate_copy();
     } else if matches_key(&key, &keys.move_item) {
@@ -1284,6 +1355,15 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
     let new_state = app.focus_snapshot();
     if prev_state != new_state {
         app.preview_scroll_offset = 0;
+        let selected_item = app.get_active_panel().get_selected_item().cloned();
+        if let Some(item) = selected_item {
+            if let Dialog::ViewFile { path, content, scroll_offset, .. } = &mut app.dialog {
+                *path = item.path.clone();
+                *content = "\n  Loading preview...".to_string();
+                *scroll_offset = 0;
+                app.trigger_async_preview(item.path.clone(), 120, 40);
+            }
+        }
     }
 }
 

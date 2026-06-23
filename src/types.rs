@@ -110,8 +110,7 @@ pub fn read_dir(path: &Path) -> io::Result<Vec<FileItem>> {
 
     for entry in entries.flatten() {
         let entry_path = entry.path();
-        // symlink_metadata() does not follow links — needed to detect symlinks.
-        let link_meta = entry.metadata().ok(); // follows symlink (for is_dir/size)
+        let link_meta = fs::metadata(&entry_path).ok(); // follows symlink (for is_dir/size)
         let file_type = entry.file_type(); // does not follow symlink
 
         let is_symlink = file_type.as_ref().map(|ft| ft.is_symlink()).unwrap_or(false);
@@ -225,7 +224,7 @@ pub fn read_dir_preview(path: &Path) -> String {
             let mut count = 0;
             for entry in entries.flatten().take(40) {
                 let name = entry.file_name().to_string_lossy().into_owned();
-                let is_dir = entry.metadata().map(|m| m.is_dir()).unwrap_or(false);
+                let is_dir = fs::metadata(entry.path()).map(|m| m.is_dir()).unwrap_or(false);
                 if is_dir {
                     preview.push_str(&format!("  📁 {}/\n", name));
                 } else {
@@ -352,7 +351,24 @@ impl InputField {
     }
 }
 
-pub struct PreviewCache {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PreviewState {
+    None,
+    Loading {
+        path: PathBuf,
+        width: u16,
+        height: u16,
+    },
+    Ready {
+        path: PathBuf,
+        width: u16,
+        height: u16,
+        content: String,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub struct PreviewResult {
     pub path: PathBuf,
     pub width: u16,
     pub height: u16,
@@ -392,6 +408,7 @@ pub enum Dialog {
         path: PathBuf,
         content: String,
         scroll_offset: usize,
+        focused: bool,
     },
     CommandLine {
         input: InputField,
@@ -439,6 +456,80 @@ pub enum Dialog {
     },
 }
 
+pub fn get_icon(item: &FileItem, use_nerd_fonts: bool) -> &'static str {
+    if !use_nerd_fonts {
+        if item.name == ".." {
+            "↩ "
+        } else if item.is_dir {
+            "📁 "
+        } else if item.is_symlink {
+            "🔗 "
+        } else if item.is_exec {
+            "⚙️ "
+        } else {
+            "📄 "
+        }
+    } else {
+        if item.name == ".." {
+            "\u{f112} " // nf-fa-reply / ↩
+        } else if item.is_dir {
+            "\u{e5ff} " // nf-custom-folder / 
+        } else if item.is_symlink {
+            "\u{f0c1} " // nf-fa-link / 
+        } else if item.is_exec {
+            "\u{e795} " // nf-dev-terminal / 
+        } else {
+            // Check special files
+            match item.name.to_lowercase().as_str() {
+                "dockerfile" => return "\u{f308} ", // nf-linux-docker
+                "makefile" => return "\u{e615} ", // Makefile gear/config
+                "cargo.toml" => return "🦀 ", // Cute crab emoji for Rust projects!
+                "package.json" => return "\u{e718} ", // Node
+                "license" => return "\u{f15c} ", // File text/license
+                _ => {}
+            }
+            if item.name.starts_with(".git") {
+                return "\u{e702} ";
+            }
+            
+            // Check extensions
+            let ext = Path::new(&item.name)
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+                
+            match ext.as_str() {
+                "rs" => "\u{e7a8} ",
+                "py" => "\u{e606} ",
+                "js" => "\u{e60c} ",
+                "ts" => "\u{e608} ",
+                "json" => "\u{e60b} ",
+                "toml" => "\u{e615} ",
+                "md" => "\u{e609} ",
+                "sh" | "bash" | "zsh" => "\u{e795} ",
+                "html" => "\u{e60e} ",
+                "css" => "\u{e749} ",
+                "pdf" => "\u{f1c1} ",
+                "zip" | "tar" | "gz" | "rar" | "7z" | "bz2" | "xz" => "\u{f1c6} ",
+                "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" => "\u{f1c5} ",
+                "mp4" | "mkv" | "avi" | "mov" | "webm" | "flv" => "\u{f03d} ",
+                "mp3" | "wav" | "flac" | "m4a" | "ogg" => "\u{f1c7} ",
+                "go" => "\u{e627} ",
+                "c" => "\u{e61e} ",
+                "cpp" | "cc" | "cxx" => "\u{e61d} ",
+                "h" | "hpp" => "\u{f0fd} ",
+                "java" | "jar" => "\u{e738} ",
+                "lock" => "\u{f023} ",
+                "yaml" | "yml" => "\u{e615} ",
+                "xml" => "\u{f05c0} ",
+                "sql" | "db" | "sqlite" => "\u{e706} ",
+                _ => "\u{f15b} ", // default file icon (nf-fa-file_o)
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -451,6 +542,32 @@ mod tests {
         assert_eq!(format_size(1024 * 1024), "1.0 MB");
         assert_eq!(format_size(1024 * 1024 * 1024), "1.0 GB");
         assert_eq!(format_size(1024 * 1024 * 1024 * 5 + 500 * 1024 * 1024), "5.5 GB");
+    }
+
+    #[test]
+    fn test_get_icon() {
+        let mut item = FileItem {
+            name: "test.rs".to_string(),
+            path: PathBuf::from("test.rs"),
+            is_dir: false,
+            is_symlink: false,
+            is_exec: false,
+            size: 0,
+            modified: None,
+        };
+
+        // Standard icons (non Nerd Font)
+        assert_eq!(get_icon(&item, false), "📄 ");
+        item.is_dir = true;
+        assert_eq!(get_icon(&item, false), "📁 ");
+
+        // Nerd Font icons
+        item.is_dir = false;
+        assert_eq!(get_icon(&item, true), "\u{e7a8} "); // Rust icon
+        item.name = "test.py".to_string();
+        assert_eq!(get_icon(&item, true), "\u{e606} "); // Python icon
+        item.name = "Dockerfile".to_string();
+        assert_eq!(get_icon(&item, true), "\u{f308} "); // Docker icon
     }
 
     #[test]
@@ -631,7 +748,7 @@ mod tests {
             app.get_active_panel_mut().selected = idx;
         }
 
-        let backend = ratatui::backend::CrosstermBackend::new(std::io::stdout());
+        let backend = ratatui::backend::TestBackend::new(80, 24);
         let mut terminal = ratatui::Terminal::new(backend).unwrap();
 
         app.handle_enter_or_right(&mut terminal, false);
@@ -640,5 +757,26 @@ mod tests {
         assert_eq!(app.status_message, "Press Enter to edit/open file");
 
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_view_file_focus_state() {
+        let mut app = crate::app::App::new();
+        let path = std::path::PathBuf::from("dummy_test_path.txt");
+        app.dialog = Dialog::ViewFile {
+            path: path.clone(),
+            content: "dummy content".to_string(),
+            scroll_offset: 0,
+            focused: true,
+        };
+
+        if let Dialog::ViewFile { path: p, content: c, scroll_offset: s, focused: f } = &app.dialog {
+            assert_eq!(p, &path);
+            assert_eq!(c, "dummy content");
+            assert_eq!(*s, 0);
+            assert!(*f);
+        } else {
+            panic!("Expected Dialog::ViewFile");
+        }
     }
 }
