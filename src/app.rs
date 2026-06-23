@@ -9,20 +9,33 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use ratatui::{backend::CrosstermBackend, Terminal};
+use ratatui::Terminal;
 
 use crate::config::*;
+use crate::fileops::{self, JobState, OpKind};
+use crate::layout::{Dir, Node, PanelId};
 use crate::panel::*;
 use crate::types::*;
+
+use ratatui::layout::Rect;
+use ratatui::widgets::ListState;
 
 // =============================================================================
 // App Controller State
 // =============================================================================
 
 pub struct App {
-    pub left_panel: Panel,
-    pub right_panel: Panel,
-    pub active_panel: ActivePanel,
+    /// Panel arena. Slots are kept stable (tombstoned, never shifted) so the
+    /// layout tree can reference panels by a stable id.
+    pub panels: Vec<Option<Panel>>,
+    /// Currently focused panel id (always a live leaf in `root`).
+    pub focus: PanelId,
+    /// The "other" panel — copy/move destination and sync/swap partner.
+    pub partner: PanelId,
+    /// Tiling split tree over panel ids.
+    pub root: Node,
+    /// Leaf screen rectangles from the last render, for mouse hit-testing.
+    pub leaf_rects: Vec<(PanelId, Rect)>,
     pub dialog: Dialog,
     pub status_message: String,
     pub should_quit: bool,
@@ -32,8 +45,15 @@ pub struct App {
     pub tree_mode: bool,
     pub tree_nodes: Vec<TreeNode>,
     pub tree_selected: usize,
-    pub preview_cache: Option<PreviewCache>,
+    /// Persistent list state for the tree pane so its scroll offset survives
+    /// across frames (needed for correct mouse hit-testing).
+    pub tree_state: ListState,
+    pub preview_state: PreviewState,
+    pub preview_tx: std::sync::mpsc::Sender<PreviewResult>,
+    pub preview_rx: std::sync::mpsc::Receiver<PreviewResult>,
     pub running_process: Option<RunningProcess>,
+    pub preview_scroll_offset: usize,
+    pub fs_job: Option<JobState>,
 }
 
 impl App {
@@ -52,10 +72,17 @@ impl App {
                 }
             }
         }
+        let left = Panel::new(current_dir.clone(), config.show_hidden, config.sort_by.clone());
+        let right = Panel::new(current_dir, config.show_hidden, config.sort_by.clone());
+        let mut root = Node::leaf(0);
+        root.split_leaf(0, 1, Dir::Horizontal);
+        let (preview_tx, preview_rx) = std::sync::mpsc::channel();
         Self {
-            left_panel: Panel::new(current_dir.clone(), config.show_hidden, config.sort_by.clone()),
-            right_panel: Panel::new(current_dir, config.show_hidden, config.sort_by.clone()),
-            active_panel: ActivePanel::Left,
+            panels: vec![Some(left), Some(right)],
+            focus: 0,
+            partner: 1,
+            root,
+            leaf_rects: Vec::new(),
             dialog: Dialog::None,
             status_message: String::new(),
             should_quit: false,
@@ -65,41 +92,311 @@ impl App {
             tree_mode: false,
             tree_nodes: Vec::new(),
             tree_selected: 0,
-            preview_cache: None,
+            tree_state: ListState::default(),
+            preview_state: PreviewState::None,
+            preview_tx,
+            preview_rx,
             running_process: None,
+            preview_scroll_offset: 0,
+            fs_job: None,
+        }
+    }
+
+    /// True while a background copy/move/delete job is running.
+    pub fn is_fs_busy(&self) -> bool {
+        self.fs_job.is_some()
+    }
+
+    /// Poll the background fs job; on completion refresh panels, clear marks,
+    /// and surface a status message (including any collected per-item errors).
+    pub fn drain_fs_job(&mut self) {
+        let just_finished = match self.fs_job {
+            Some(ref mut job) => job.poll(),
+            None => false,
+        };
+        if !just_finished {
+            return;
+        }
+        if let Some(job) = self.fs_job.take() {
+            let err_count = job.errors.len();
+            if job.is_cancelled() {
+                self.status_message = format!("{} cancelled", job.kind.verb());
+            } else if err_count > 0 {
+                let first = job.errors.first().cloned().unwrap_or_default();
+                self.status_message = format!(
+                    "{} finished with {} error(s): {}",
+                    job.kind.past(), err_count, first
+                );
+                self.dialog = Dialog::Error {
+                    message: format!(
+                        "{} completed with {} error(s):\n\n{}",
+                        job.kind.past(), err_count,
+                        job.errors.join("\n")
+                    ),
+                };
+            } else {
+                self.status_message = format!("{} {} item(s)", job.kind.past(), job.total_files);
+            }
+            self.get_active_panel_mut().marked.clear();
+            self.refresh_panels();
+        }
+    }
+
+    /// Cancel the running fs job, if any.
+    pub fn cancel_fs_job(&mut self) {
+        if let Some(ref job) = self.fs_job {
+            job.cancel();
+            self.status_message = "Cancelling…".to_string();
         }
     }
 
     pub fn apply_config(&mut self) {
-        self.left_panel.show_hidden = self.config.show_hidden;
-        self.left_panel.sort_by = self.config.sort_by.clone();
-
-        self.right_panel.show_hidden = self.config.show_hidden;
-        self.right_panel.sort_by = self.config.sort_by.clone();
+        let (show_hidden, sort_by) = (self.config.show_hidden, self.config.sort_by.clone());
+        for slot in self.panels.iter_mut() {
+            if let Some(p) = slot {
+                p.show_hidden = show_hidden;
+                p.sort_by = sort_by.clone();
+            }
+        }
 
         self.keymap = load_keymap(&self.config);
 
         self.refresh_panels();
     }
 
+    // ---- Panel arena access -------------------------------------------------
+
+    pub fn panel(&self, id: PanelId) -> &Panel {
+        self.panels[id].as_ref().expect("live panel slot")
+    }
+
+    pub fn panel_mut(&mut self, id: PanelId) -> &mut Panel {
+        self.panels[id].as_mut().expect("live panel slot")
+    }
+
     pub fn get_active_panel_mut(&mut self) -> &mut Panel {
-        match self.active_panel {
-            ActivePanel::Left => &mut self.left_panel,
-            ActivePanel::Right => &mut self.right_panel,
-        }
+        let f = self.focus;
+        self.panel_mut(f)
     }
 
     pub fn get_active_panel(&self) -> &Panel {
-        match self.active_panel {
-            ActivePanel::Left => &self.left_panel,
-            ActivePanel::Right => &self.right_panel,
-        }
+        self.panel(self.focus)
     }
 
     pub fn get_inactive_panel(&self) -> &Panel {
-        match self.active_panel {
-            ActivePanel::Left => &self.right_panel,
-            ActivePanel::Right => &self.left_panel,
+        self.panel(self.partner)
+    }
+
+    /// Directories of every live pane (for the filesystem watcher).
+    pub fn watch_dirs(&self) -> Vec<PathBuf> {
+        self.root
+            .leaves()
+            .iter()
+            .map(|&id| self.panel(id).path.clone())
+            .collect()
+    }
+
+    /// Reset the git-status cache on every pane (forces a re-query on refresh).
+    pub fn reset_git_query_all(&mut self) {
+        for slot in self.panels.iter_mut() {
+            if let Some(p) = slot {
+                p.last_git_query = None;
+            }
+        }
+    }
+
+    /// In tree mode the first leaf is the tree pane; the partner shows contents.
+    pub fn is_tree_pane_focused(&self) -> bool {
+        self.focus == self.root.first_leaf()
+    }
+
+    /// Snapshot used to detect navigation (resets the preview scroll offset).
+    pub fn focus_snapshot(&self) -> (PanelId, PathBuf, usize) {
+        let p = self.get_active_panel();
+        (self.focus, p.path.clone(), p.selected)
+    }
+
+    fn alloc_panel(&mut self, p: Panel) -> PanelId {
+        if let Some(i) = self.panels.iter().position(|s| s.is_none()) {
+            self.panels[i] = Some(p);
+            i
+        } else {
+            self.panels.push(Some(p));
+            self.panels.len() - 1
+        }
+    }
+
+    /// Keep `partner` a valid live leaf distinct from `focus` where possible.
+    fn ensure_partner(&mut self) {
+        let leaves = self.root.leaves();
+        if !leaves.contains(&self.partner) || self.partner == self.focus {
+            self.partner = leaves
+                .iter()
+                .copied()
+                .find(|&l| l != self.focus)
+                .unwrap_or(self.focus);
+        }
+    }
+
+    // ---- Tiling operations --------------------------------------------------
+
+    /// Split the focused pane, opening a new pane on the same directory.
+    pub fn split_focus(&mut self, dir: Dir) {
+        let (path, show_hidden, sort_by) = {
+            let p = self.get_active_panel();
+            (p.path.clone(), p.show_hidden, p.sort_by.clone())
+        };
+        let new_panel = Panel::new(path, show_hidden, sort_by);
+        let id = self.alloc_panel(new_panel);
+        self.root.split_leaf(self.focus, id, dir);
+        self.partner = self.focus;
+        self.focus = id;
+        self.status_message = format!(
+            "Split {} — {} panes",
+            if dir == Dir::Horizontal { "vertically" } else { "horizontally" },
+            self.root.leaves().len()
+        );
+    }
+
+    /// Close the focused pane, unless it is the last one.
+    pub fn close_focus(&mut self) {
+        if self.root.leaves().len() <= 1 {
+            self.status_message = "Cannot close the last pane".to_string();
+            return;
+        }
+        let closing = self.focus;
+        if let Some(new_root) = self.root.clone().close_leaf(closing) {
+            self.root = new_root;
+            self.panels[closing] = None;
+            let leaves = self.root.leaves();
+            self.focus = *leaves.first().unwrap_or(&0);
+            self.ensure_partner();
+            self.status_message = format!("Closed pane — {} left", self.root.leaves().len());
+        }
+    }
+
+    /// Cycle focus to the next pane (Tab). Records the previous as partner.
+    pub fn focus_next(&mut self) {
+        let leaves = self.root.leaves();
+        if leaves.len() <= 1 {
+            return;
+        }
+        let pos = leaves.iter().position(|&l| l == self.focus).unwrap_or(0);
+        let next = leaves[(pos + 1) % leaves.len()];
+        self.partner = self.focus;
+        self.focus = next;
+    }
+
+    /// Focus the first (top-left) pane; used when entering tree mode.
+    pub fn focus_first_pane(&mut self) {
+        let first = self.root.first_leaf();
+        self.focus = first;
+        self.ensure_partner();
+    }
+
+    /// Move the focused pane to the partner pane's current directory.
+    pub fn sync_focus_to_partner(&mut self) {
+        self.ensure_partner();
+        if self.partner == self.focus {
+            return;
+        }
+        let target = self.get_inactive_panel().path.clone();
+        let focus = self.focus;
+        let _ = self.panel_mut(focus).set_path(target);
+    }
+
+    /// Focus a specific pane id (mouse click). Records previous as partner.
+    pub fn focus_panel(&mut self, id: PanelId) {
+        if id != self.focus && self.root.contains(id) {
+            self.partner = self.focus;
+            self.focus = id;
+        }
+    }
+
+    // ---- Mouse helpers ------------------------------------------------------
+
+    /// The pane (and its rect) at a screen cell, using the last render's rects.
+    pub fn pane_at(&self, col: u16, row: u16) -> Option<(PanelId, Rect)> {
+        self.leaf_rects
+            .iter()
+            .find(|(_, r)| {
+                col >= r.x && col < r.x + r.width && row >= r.y && row < r.y + r.height
+            })
+            .copied()
+    }
+
+    /// Map a screen row inside a pane's rect to a list item index.
+    fn item_index_at(&self, id: PanelId, rect: Rect, row: u16) -> Option<usize> {
+        // List body sits inside the block border: first row is rect.y + 1.
+        if row <= rect.y || row + 1 >= rect.y + rect.height {
+            return None;
+        }
+        let panel = self.panel(id);
+        let offset = panel.scroll_state.offset();
+        let idx = offset + (row - rect.y - 1) as usize;
+        if idx < panel.items.len() {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
+    /// Handle a left click in a pane: focus it and select the item under the
+    /// cursor. Returns true if the click landed on the already-selected item
+    /// (the caller then treats it as an "activate": enter dir / open file).
+    pub fn click_pane(&mut self, id: PanelId, rect: Rect, row: u16) -> bool {
+        let already_focused = self.focus == id;
+        self.focus_panel(id);
+        if let Some(idx) = self.item_index_at(id, rect, row) {
+            let was_selected = already_focused && self.panel(id).selected == idx;
+            let p = self.panel_mut(id);
+            p.selected = idx;
+            p.scroll_state.select(Some(idx));
+            was_selected
+        } else {
+            false
+        }
+    }
+
+    /// Click inside the tree pane: select the node under the cursor, or toggle
+    /// it (expand/collapse) when it was already selected.
+    pub fn click_tree(&mut self, rect: Rect, row: u16) {
+        if row <= rect.y {
+            return;
+        }
+        // Account for the tree pane's scroll offset (long trees scroll).
+        let idx = self.tree_state.offset() + (row - rect.y - 1) as usize;
+        if idx < self.tree_nodes.len() {
+            let was_selected = self.tree_selected == idx;
+            self.tree_selected = idx;
+            if was_selected {
+                self.toggle_tree_node();
+            } else {
+                self.update_right_panel_from_tree();
+            }
+        }
+    }
+
+    /// Scroll-wheel over a pane: focus it and move the selection.
+    pub fn scroll_pane(&mut self, id: PanelId, down: bool) {
+        self.focus_panel(id);
+        let p = self.panel_mut(id);
+        if down {
+            p.select_next();
+        } else {
+            p.select_prev();
+        }
+    }
+
+    /// Grow or shrink the focused pane along `dir` by adjusting its nearest
+    /// ancestor split of that orientation.
+    pub fn resize_focus(&mut self, grow: bool, dir: Dir) {
+        if let Some((path, in_first)) = self.root.ancestor_split(self.focus, dir) {
+            if let Some(cur) = self.root.get_ratio(&path) {
+                let step = 0.05;
+                let delta = if grow == in_first { step } else { -step };
+                self.root.set_ratio(&path, cur + delta);
+            }
         }
     }
 
@@ -108,38 +405,45 @@ impl App {
             self.init_tree();
             self.update_right_panel_from_tree();
         } else {
-            self.left_panel.refresh();
-            self.right_panel.refresh();
+            for slot in self.panels.iter_mut() {
+                if let Some(p) = slot {
+                    p.refresh();
+                }
+            }
         }
     }
 
+    /// Tab: cycle focus to the next pane.
     pub fn toggle_panel(&mut self) {
-        self.active_panel = match self.active_panel {
-            ActivePanel::Left => ActivePanel::Right,
-            ActivePanel::Right => ActivePanel::Left,
-        };
+        self.focus_next();
     }
 
-    /// Sync inactive panel to the same directory as the active panel.
+    /// Sync the partner pane to the focused pane's directory.
     pub fn sync_panels(&mut self) {
+        self.ensure_partner();
+        if self.partner == self.focus {
+            return;
+        }
         let active_path = self.get_active_panel().path.clone();
-        let inactive = match self.active_panel {
-            ActivePanel::Left => &mut self.right_panel,
-            ActivePanel::Right => &mut self.left_panel,
-        };
-        let _ = inactive.set_path(active_path);
+        let partner = self.partner;
+        let _ = self.panel_mut(partner).set_path(active_path);
     }
 
-    /// Swap left and right panel directories.
+    /// Swap the focused and partner pane directories.
     pub fn swap_panels(&mut self) {
-        let left_path = self.left_panel.path.clone();
-        let right_path = self.right_panel.path.clone();
-        let _ = self.left_panel.set_path(right_path);
-        let _ = self.right_panel.set_path(left_path);
+        self.ensure_partner();
+        if self.partner == self.focus {
+            return;
+        }
+        let a = self.get_active_panel().path.clone();
+        let b = self.get_inactive_panel().path.clone();
+        let (focus, partner) = (self.focus, self.partner);
+        let _ = self.panel_mut(focus).set_path(b);
+        let _ = self.panel_mut(partner).set_path(a);
     }
 
     pub fn init_tree(&mut self) {
-        let root_path = self.left_panel.path.clone();
+        let root_path = self.get_active_panel().path.clone();
         self.tree_nodes.clear();
         self.tree_selected = 0;
 
@@ -159,8 +463,10 @@ impl App {
         if let Ok(entries) = fs::read_dir(&root_path) {
             let mut subdirs = Vec::new();
             for entry in entries.flatten() {
-                if let Ok(meta) = entry.metadata() {
-                    if meta.is_dir() {
+                // Skip symlinks so the tree can never descend into a loop.
+                let is_symlink = entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(false);
+                if let Ok(meta) = entry.metadata()
+                    && meta.is_dir() && !is_symlink {
                         let name = entry.file_name().to_string_lossy().into_owned();
                         if !name.starts_with('.') {
                             let path = entry.path();
@@ -174,9 +480,8 @@ impl App {
                             });
                         }
                     }
-                }
             }
-            subdirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            subdirs.sort_by_key(|a| a.name.to_lowercase());
             self.tree_nodes.extend(subdirs);
         }
     }
@@ -207,8 +512,9 @@ impl App {
             let mut subdirs = Vec::new();
             if let Ok(entries) = fs::read_dir(&path) {
                 for entry in entries.flatten() {
-                    if let Ok(meta) = entry.metadata() {
-                        if meta.is_dir() {
+                    let is_symlink = entry.file_type().map(|ft| ft.is_symlink()).unwrap_or(false);
+                    if let Ok(meta) = entry.metadata()
+                        && meta.is_dir() && !is_symlink {
                             let name = entry.file_name().to_string_lossy().into_owned();
                             if !name.starts_with('.') {
                                 let sub_path = entry.path();
@@ -222,10 +528,9 @@ impl App {
                                 });
                             }
                         }
-                    }
                 }
             }
-            subdirs.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            subdirs.sort_by_key(|a| a.name.to_lowercase());
             
             for (offset, item) in subdirs.into_iter().enumerate() {
                 self.tree_nodes.insert(idx + 1 + offset, item);
@@ -237,12 +542,16 @@ impl App {
     }
 
     pub fn update_right_panel_from_tree(&mut self) {
+        // In tree mode the partner pane shows the contents of the selected node.
+        self.ensure_partner();
         if let Some(node) = self.tree_nodes.get(self.tree_selected) {
             let path = node.path.clone();
-            self.right_panel.path = path;
-            self.right_panel.refresh();
-            self.right_panel.selected = 0;
-            self.right_panel.scroll_state.select(Some(0));
+            let partner = self.partner;
+            let p = self.panel_mut(partner);
+            p.path = path;
+            p.refresh();
+            p.selected = 0;
+            p.scroll_state.select(Some(0));
         }
     }
 
@@ -252,82 +561,33 @@ impl App {
     pub fn execute_overlay_command(active_dir: &std::path::Path, cmd: &str) -> (Vec<String>, bool, Option<std::process::Child>) {
         let mut lines = Vec::new();
 
-        // Guard: prevent launching rc inside rc (recursion)
-        let self_names = ["rc", "rust-commander"];
-        let first_word = cmd.split_whitespace().next().unwrap_or("");
-        let first_word_base = std::path::Path::new(first_word)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap_or(first_word);
-
-        if self_names.contains(&first_word_base) {
+        // Guard: prevent launching rc inside rc (recursion).
+        if crate::shell::is_self(cmd) {
             lines.push("⚠ Cannot launch rc inside rc (would cause recursion).".to_string());
             lines.push("  Use a separate terminal window instead.".to_string());
             return (lines, false, None);
         }
 
-        // Detect TUI / full-screen programs that need terminal control.
-        // These cannot be captured via .output() — they must be run via .spawn().
-        let tui_programs = [
-            "lazygit", "vim", "nvim", "nano", "emacs", "htop", "btop",
-            "less", "more", "man", "top", "mc", "ranger", "nnn", "tig",
-            "fzf", "zsh", "bash", "fish", "python", "irb", "node", "lua",
-        ];
-        let is_tui = tui_programs.contains(&first_word_base);
-
-        if is_tui {
-            lines.push(format!("[Launching {}...]", first_word_base));
-
-            // Step 1: fully surrender the terminal to the child TUI app
-            let _ = crossterm::terminal::disable_raw_mode();
-            let _ = crossterm::execute!(
-                std::io::stdout(),
-                crossterm::terminal::LeaveAlternateScreen,
-                crossterm::cursor::Show
-            );
-
-            // Step 2: run the TUI program with inherited stdin/stdout/stderr
-            let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-            let _ = std::process::Command::new(&shell)
-                .arg("-c")
-                .arg(cmd)
-                .current_dir(active_dir)
-                .stdin(std::process::Stdio::inherit())
-                .stdout(std::process::Stdio::inherit())
-                .stderr(std::process::Stdio::inherit())
-                .status();
-
-            // Step 3: re-enable raw mode and enter alternate screen
-            // We must do this BEFORE ratatui draws, and signal caller to clear.
-            let _ = crossterm::terminal::enable_raw_mode();
-            let _ = crossterm::execute!(
-                std::io::stdout(),
-                crossterm::terminal::EnterAlternateScreen,
-                crossterm::cursor::Hide
-            );
-
-            lines.push(format!("[{} exited — press Esc to return to rc]", first_word_base));
-            // needs_clear = true so caller calls terminal.clear()
+        // Full-screen / interactive programs need the real TTY — run them in
+        // the foreground (suspending the alt-screen) instead of capturing them.
+        if crate::shell::needs_tty(cmd) {
+            let prog = crate::shell::first_program(cmd);
+            lines.push(format!("[Launching {}...]", prog));
+            let _ = crate::shell::run_foreground(cmd, active_dir);
+            // needs_clear = true so the caller calls terminal.clear() before redraw.
+            lines.push(format!("[{} exited — press Esc to return to rc]", prog));
             return (lines, true, None);
         }
 
-        // Spawn the command asynchronously with piped stdout/stderr
-        let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-        match std::process::Command::new(&shell)
-            .arg("-c")
-            .arg(cmd)
-            .current_dir(active_dir)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn() {
-            Ok(child) => {
-                return (lines, false, Some(child));
-            }
+        // Everything else streams via a piped child (stdin = null so an
+        // unexpected TUI can't hang the overlay waiting on input).
+        match crate::shell::spawn_piped(cmd, active_dir) {
+            Ok(child) => (lines, false, Some(child)),
             Err(e) => {
                 lines.push(format!("Failed to execute command: {}", e));
+                (lines, false, None)
             }
         }
-        (lines, false, None)
     }
 
     // Wrap a spawned child process into a RunningProcess with threaded readers
@@ -415,8 +675,8 @@ impl App {
         }
 
         // Apply new lines to TerminalOverlay dialog
-        if !new_lines.is_empty() {
-            if let Dialog::TerminalOverlay { output_lines, scroll_offset, .. } = &mut self.dialog {
+        if !new_lines.is_empty()
+            && let Dialog::TerminalOverlay { output_lines, scroll_offset, .. } = &mut self.dialog {
                 output_lines.extend(new_lines);
                 // Cap buffer at 10000 lines to prevent memory explosion
                 const MAX_LINES: usize = 10_000;
@@ -430,7 +690,6 @@ impl App {
                     *scroll_offset = output_lines.len() - display_height;
                 }
             }
-        }
 
         if process_done {
             self.running_process = None;
@@ -455,7 +714,7 @@ impl App {
         self.running_process = None;
     }
 
-    pub fn handle_enter(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
+    pub fn handle_enter_or_right<B: ratatui::backend::Backend>(&mut self, terminal: &mut Terminal<B>, is_enter: bool) {
         let selected_item = {
             let panel = self.get_active_panel();
             panel.get_selected_item().cloned()
@@ -470,19 +729,10 @@ impl App {
                     self.status_message = format!("Entered: {}", item.name);
                 }
             } else if item.path.is_file() {
-                // Open in external editor (nvim/vim/nano — whatever is configured)
-                match edit_file(&item.path, &self.config.default_editor) {
-                    Ok(_) => {
-                        self.status_message = format!("Edited: {}", item.name);
-                        self.refresh_panels();
-                        let _ = terminal.clear();
-                    }
-                    Err(e) => {
-                        let _ = terminal.clear();
-                        self.dialog = Dialog::Error {
-                            message: format!("Failed to open editor: {}", e),
-                        };
-                    }
+                if is_enter {
+                    self.open_editor(terminal);
+                } else {
+                    self.status_message = "Press Enter to edit/open file".to_string();
                 }
             }
         }
@@ -500,102 +750,197 @@ impl App {
         }
     }
 
+    /// Poll the channel for finished async previews.
+    /// Returns true if a preview finished loading (so the UI can be redrawn).
+    pub fn drain_previews(&mut self) -> bool {
+        let mut got_any = false;
+        while let Ok(res) = self.preview_rx.try_recv() {
+            // 1. Update preview_state (for quick-view pane)
+            if let PreviewState::Loading { ref path, width, height } = self.preview_state {
+                if path == &res.path && width == res.width && height == res.height {
+                    self.preview_state = PreviewState::Ready {
+                        path: res.path.clone(),
+                        width: res.width,
+                        height: res.height,
+                        content: res.content.clone(),
+                    };
+                    got_any = true;
+                }
+            }
+            // 2. Update Dialog::ViewFile content (for split/fullscreen file viewer)
+            if let Dialog::ViewFile { path, content, .. } = &mut self.dialog {
+                if *path == res.path {
+                    *content = res.content.clone();
+                    got_any = true;
+                }
+            }
+        }
+        got_any
+    }
+
     pub fn get_preview_content(&mut self, path: PathBuf, cols: u16, rows: u16) -> String {
-        if let Some(ref cache) = self.preview_cache {
-            if cache.path == path && cache.width == cols && cache.height == rows {
-                return cache.content.clone();
+        match &self.preview_state {
+            PreviewState::Ready { path: p, width: w, height: h, content }
+                if p == &path && *w == cols && *h == rows =>
+            {
+                content.clone()
+            }
+            PreviewState::Loading { path: p, width: w, height: h }
+                if p == &path && *w == cols && *h == rows =>
+            {
+                "\n  Loading preview...".to_string()
+            }
+            _ => {
+                // Either no preview or preview for a different file/size.
+                // Transition state to Loading and trigger the async generator task.
+                self.preview_state = PreviewState::Loading {
+                    path: path.clone(),
+                    width: cols,
+                    height: rows,
+                };
+                
+                let tx = self.preview_tx.clone();
+                let path_clone = path;
+                tokio::spawn(async move {
+                    let content = Self::generate_async_preview(&path_clone, cols, rows).await;
+                    let _ = tx.send(PreviewResult {
+                        path: path_clone,
+                        width: cols,
+                        height: rows,
+                        content,
+                    });
+                });
+                
+                "\n  Loading preview...".to_string()
             }
         }
-        
-        let content = self.generate_preview_content(&path, cols, rows);
-        self.preview_cache = Some(PreviewCache {
-            path: path.clone(),
-            width: cols,
-            height: rows,
-            content: content.clone(),
-        });
-        content
     }
 
-    fn generate_preview_content(&self, path: &Path, cols: u16, rows: u16) -> String {
-        let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-        
-        // 1. Image previews via chafa
-        if ["png", "jpg", "jpeg", "gif", "webp", "bmp"].contains(&ext.as_str()) {
-            if let Ok(out) = std::process::Command::new("chafa")
-                .arg(format!("--size={}x{}", cols, rows))
-                .arg(path)
-                .output() {
-                if out.status.success() {
-                    return String::from_utf8_lossy(&out.stdout).into_owned();
-                }
-            }
-            return format!(
-                "\n  [ Image Preview ]\n  File: {}\n\n  Tip: Install 'chafa' (e.g. 'brew install chafa')\n  for beautiful inline terminal image previews!",
-                path.file_name().unwrap_or_default().to_string_lossy()
-            );
-        }
-
-        // 2. Code previews via bat
-        let is_text = ["rs", "py", "js", "ts", "json", "toml", "md", "sh", "txt", "cfg", "ini", "yaml", "yml", "xml", "html", "css", "c", "cpp", "h", "go", "java"].contains(&ext.as_str());
-        if is_text {
-            if let Ok(out) = std::process::Command::new("bat")
-                .arg("--color=always")
-                .arg("--style=plain")
-                .arg(format!("--terminal-width={}", cols))
-                .arg(path)
-                .output() {
-                if out.status.success() {
-                    let raw_str = String::from_utf8_lossy(&out.stdout);
-                    let lines: Vec<&str> = raw_str.lines().take(rows as usize).collect();
-                    return lines.join("\n");
-                }
-            }
-        }
-
-        read_file_preview(path)
+async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> String {
+    if path.is_dir() {
+        let path_clone = path.to_path_buf();
+        return tokio::task::spawn_blocking(move || {
+            read_dir_preview(&path_clone)
+        }).await.unwrap_or_else(|_| "Error loading directory preview".to_string());
     }
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    
+    // 1. Image previews via chafa
+    if ["png", "jpg", "jpeg", "gif", "webp", "bmp"].contains(&ext.as_str()) {
+        let mut cmd = tokio::process::Command::new("chafa");
+        cmd.arg(format!("--size={}x{}", cols, rows)).arg(path);
+        if let Ok(out) = cmd.output().await {
+            if out.status.success() {
+                return String::from_utf8_lossy(&out.stdout).into_owned();
+            }
+        }
+        return format!(
+            "\n  [ Image Preview ]\n  File: {}\n\n  Tip: Install 'chafa' (e.g. 'brew install chafa')\n  for beautiful inline terminal image previews!",
+            path.file_name().unwrap_or_default().to_string_lossy()
+        );
+    }
+
+    // 2. Code previews via bat
+    let is_text = ["rs", "py", "js", "ts", "json", "toml", "md", "sh", "txt", "cfg", "ini", "yaml", "yml", "xml", "html", "css", "c", "cpp", "h", "go", "java"].contains(&ext.as_str());
+    if is_text {
+        let mut cmd = tokio::process::Command::new("bat");
+        cmd.arg("--color=always")
+           .arg("--style=plain")
+           .arg(format!("--terminal-width={}", cols))
+           .arg(path);
+        if let Ok(out) = cmd.output().await {
+            if out.status.success() {
+                let raw_str = String::from_utf8_lossy(&out.stdout);
+                let lines: Vec<&str> = raw_str.lines().take(rows as usize).collect();
+                return lines.join("\n");
+            }
+        }
+    }
+
+    // 3. Fallback to standard text / hex preview (blocking thread pool spawn)
+    let path_clone = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        read_file_preview(&path_clone)
+    })
+    .await
+    .unwrap_or_else(|_| "Error generating preview".to_string())
+}
 
     // =========================================================================
     // Core Actions (View, Edit, Copy, Move, Mkdir, Delete) — Bulk selections aware!
     // =========================================================================
 
-    pub fn open_viewer(&mut self, path: PathBuf) {
-        let content = read_file_preview(&path);
-        self.dialog = Dialog::ViewFile {
-            path,
-            content,
-            scroll_offset: 0,
-        };
+    pub fn trigger_async_preview(&self, path: PathBuf, cols: u16, rows: u16) {
+        let tx = self.preview_tx.clone();
+        tokio::spawn(async move {
+            let content = Self::generate_async_preview(&path, cols, rows).await;
+            let _ = tx.send(PreviewResult {
+                path,
+                width: cols,
+                height: rows,
+                content,
+            });
+        });
     }
 
-    pub fn open_editor(&mut self) {
+    pub fn open_viewer(&mut self, path: PathBuf) {
+        self.dialog = Dialog::ViewFile {
+            path: path.clone(),
+            content: "\n  Loading preview...".to_string(),
+            scroll_offset: 0,
+            focused: true,
+        };
+        self.trigger_async_preview(path, 120, 40);
+    }
+
+    pub fn open_editor<B: ratatui::backend::Backend>(&mut self, terminal: &mut Terminal<B>) {
         let selected_path = self.get_active_panel().get_selected_item().map(|item| item.path.clone());
         if let Some(path) = selected_path {
             if path.is_file() {
-                // Always open built-in internal editor (F4)
-                // Use Enter for external editor (nvim/vim/nano)
-                match fs::read_to_string(&path) {
-                    Ok(content) => {
-                        let lines: Vec<String> = if content.is_empty() {
-                            vec![String::new()]
-                        } else {
-                            content.lines().map(|l| l.to_string()).collect()
-                        };
-                        self.dialog = Dialog::InternalEditor {
-                            file_path: path,
-                            lines,
-                            cursor_row: 0,
-                            cursor_col: 0,
-                            scroll_row: 0,
-                            scroll_col: 0,
-                            modified: false,
-                        };
+                if self.config.editor_mode == "external" {
+                    match edit_file_external(&path, &self.config.default_editor, self.config.split_editor) {
+                        Ok(is_split) => {
+                            self.status_message = if is_split {
+                                format!("Opened in split pane: {}", path.file_name().unwrap_or_default().to_string_lossy())
+                            } else {
+                                format!("Edited: {}", path.file_name().unwrap_or_default().to_string_lossy())
+                            };
+                            self.refresh_panels();
+                            if !is_split {
+                                let _ = terminal.clear();
+                            }
+                        }
+                        Err(e) => {
+                            let _ = terminal.clear();
+                            self.dialog = Dialog::Error {
+                                message: format!("Failed to open editor: {}", e),
+                            };
+                        }
                     }
-                    Err(e) => {
-                        self.dialog = Dialog::Error {
-                            message: format!("Cannot read file: {}", e),
-                        };
+                } else {
+                    // Open built-in internal editor (F4)
+                    match fs::read_to_string(&path) {
+                        Ok(content) => {
+                            let lines: Vec<String> = if content.is_empty() {
+                                vec![String::new()]
+                            } else {
+                                content.lines().map(|l| l.to_string()).collect()
+                            };
+                            self.dialog = Dialog::InternalEditor {
+                                file_path: path,
+                                lines,
+                                cursor_row: 0,
+                                cursor_col: 0,
+                                scroll_row: 0,
+                                scroll_col: 0,
+                                modified: false,
+                            };
+                        }
+                        Err(e) => {
+                            self.dialog = Dialog::Error {
+                                message: format!("Cannot read file: {}", e),
+                            };
+                        }
                     }
                 }
             } else {
@@ -606,7 +951,7 @@ impl App {
         }
     }
 
-    pub fn execute_shell_command(&mut self, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, cmd: String) {
+    pub fn execute_shell_command<B: ratatui::backend::Backend>(&mut self, terminal: &mut Terminal<B>, cmd: String) {
         let trimmed = cmd.trim();
         if trimmed.is_empty() { return; }
 
@@ -632,8 +977,8 @@ impl App {
                 self.status_message = format!("Changed directory to {}", self.get_active_panel().path.display());
             }
             return;
-        } else if trimmed.starts_with("cd ") {
-            let target_dir = trimmed["cd ".len()..].trim();
+        } else if let Some(rest) = trimmed.strip_prefix("cd ") {
+            let target_dir = rest.trim();
             // Remove quotes if present
             let target_dir_unquoted = if (target_dir.starts_with('\'') && target_dir.ends_with('\''))
                 || (target_dir.starts_with('"') && target_dir.ends_with('"')) {
@@ -646,7 +991,8 @@ impl App {
                 target_dir
             };
             let path_to_set = {
-                let expanded = if target_dir_unquoted == "~" {
+                
+                if target_dir_unquoted == "~" {
                     env::var("HOME").ok().or_else(|| env::var("USERPROFILE").ok())
                         .map(PathBuf::from)
                 } else if target_dir_unquoted.starts_with("~/") || target_dir_unquoted.starts_with("~\\") {
@@ -659,8 +1005,7 @@ impl App {
                     } else {
                         Some(active_dir.join(p))
                     }
-                };
-                expanded
+                }
             };
             if let Some(p) = path_to_set {
                 if p.is_dir() {
@@ -685,35 +1030,15 @@ impl App {
             return;
         }
 
-        // Determine if command should be run interactively in the foreground
-        let is_interactive = {
-            let first_word = trimmed.split_whitespace()
-                .find(|w| !w.contains('='))
-                .unwrap_or("")
-                .trim_matches(|c| c == '\'' || c == '"');
-            let interactive_bins = [
-                "vim", "vi", "nano", "emacs", "neovim", "nvim", "top", 
-                "htop", "less", "more", "ssh", "sftp", "man", "tail", "watch"
-            ];
-            interactive_bins.contains(&first_word)
-        };
+        // Interactive / full-screen programs run in the foreground with the
+        // real TTY (shared detection with the Ctrl+O overlay); everything else
+        // runs captured.
+        if crate::shell::needs_tty(trimmed) {
+            crate::shell::suspend();
 
-        #[cfg(unix)]
-        let shell = env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-        #[cfg(windows)]
-        let shell = "cmd.exe".to_string();
-
-        if is_interactive {
-            let _ = disable_raw_mode();
-            let _ = execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture, crossterm::cursor::Show);
-            
             println!("$ {}\n", trimmed);
-            
-            let status = std::process::Command::new(shell)
-                .current_dir(&active_dir)
-                .arg(if cfg!(windows) { "/c" } else { "-c" })
-                .arg(trimmed)
-                .status();
+
+            let status = crate::shell::build(trimmed, &active_dir).status();
 
             match status {
                 Ok(s) => {
@@ -729,17 +1054,12 @@ impl App {
             let mut input = String::new();
             let _ = io::stdin().read_line(&mut input);
 
-            let _ = enable_raw_mode();
-            let _ = execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture, crossterm::cursor::Hide);
+            crate::shell::resume();
             let _ = terminal.clear();
             self.refresh_panels();
         } else {
             // Run silently and capture output
-            let output = std::process::Command::new(shell)
-                .current_dir(&active_dir)
-                .arg(if cfg!(windows) { "/c" } else { "-c" })
-                .arg(trimmed)
-                .output();
+            let output = crate::shell::build(trimmed, &active_dir).output();
 
             match output {
                 Ok(out) => {
@@ -810,48 +1130,20 @@ impl App {
     pub fn execute_copy(&mut self, source: PathBuf, destination: String) {
         let dest_dir = PathBuf::from(destination);
         let marked_paths: Vec<PathBuf> = self.get_active_panel().marked.iter().cloned().collect();
-        
-        let result = if !marked_paths.is_empty() {
-            // Bulk selections copy
-            let mut err = None;
-            for path in &marked_paths {
-                let name = path.file_name().unwrap_or_default();
-                let target = dest_dir.join(name);
-                let res = if path.is_dir() {
-                    copy_dir_all(path, &target)
-                } else {
-                    fs::copy(path, &target).map(|_| ())
-                };
-                if let Err(e) = res {
-                    err = Some(e);
-                    break;
-                }
-            }
-            if let Some(e) = err { Err(e) } else { Ok(()) }
+
+        let items: Vec<(PathBuf, PathBuf)> = if !marked_paths.is_empty() {
+            // Bulk copy: each marked item lands inside the destination directory.
+            marked_paths
+                .iter()
+                .map(|p| (p.clone(), dest_dir.join(p.file_name().unwrap_or_default())))
+                .collect()
         } else {
-            // Single selection copy
-            let name = source.file_name().unwrap_or_default();
-            let target = dest_dir.join(name);
-            if source.is_dir() {
-                copy_dir_all(&source, &target)
-            } else {
-                fs::copy(&source, &target).map(|_| ())
-            }
+            // Single copy: `destination` is the full target path (allows rename).
+            vec![(source, dest_dir)]
         };
 
-        match result {
-            Ok(_) => {
-                let count = if !marked_paths.is_empty() { marked_paths.len() } else { 1 };
-                self.status_message = format!("Successfully copied {} item(s)", count);
-                self.get_active_panel_mut().marked.clear();
-                self.refresh_panels();
-            }
-            Err(e) => {
-                self.dialog = Dialog::Error {
-                    message: format!("Copy failed: {}", e),
-                };
-            }
-        }
+        self.fs_job = Some(fileops::spawn(OpKind::Copy, items));
+        self.status_message = "Copying…".to_string();
     }
 
     pub fn initiate_move(&mut self) {
@@ -877,48 +1169,29 @@ impl App {
         let dest_dir = PathBuf::from(destination);
         let marked_paths: Vec<PathBuf> = self.get_active_panel().marked.iter().cloned().collect();
 
-        let result = if !marked_paths.is_empty() {
-            // Bulk move
-            let mut err = None;
-            for path in &marked_paths {
-                let name = path.file_name().unwrap_or_default();
-                let target = dest_dir.join(name);
-                if let Err(e) = fs::rename(path, &target) {
-                    err = Some(e);
-                    break;
-                }
-            }
-            if let Some(e) = err { Err(e) } else { Ok(()) }
+        let items: Vec<(PathBuf, PathBuf)> = if !marked_paths.is_empty() {
+            // Bulk move: each marked item lands inside the destination directory.
+            marked_paths
+                .iter()
+                .map(|p| (p.clone(), dest_dir.join(p.file_name().unwrap_or_default())))
+                .collect()
         } else {
             // Single rename / move:
-            // If destination is an existing directory → move into it (append filename).
-            // If destination looks like a full path → use as-is (rename).
+            //   destination is an existing directory → move into it (append name)
+            //   otherwise treat destination as the full target path (rename)
             let target = if dest_dir.is_dir() {
-                let name = source.file_name().unwrap_or_default();
-                dest_dir.join(name)
+                dest_dir.join(source.file_name().unwrap_or_default())
             } else {
-                dest_dir.clone()
+                if let Some(parent) = dest_dir.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                dest_dir
             };
-            // Create parent directories if they don't exist
-            if let Some(parent) = target.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            fs::rename(&source, &target)
+            vec![(source, target)]
         };
 
-        match result {
-            Ok(_) => {
-                let count = if !marked_paths.is_empty() { marked_paths.len() } else { 1 };
-                self.status_message = format!("Successfully moved/renamed {} item(s)", count);
-                self.get_active_panel_mut().marked.clear();
-                self.refresh_panels();
-            }
-            Err(e) => {
-                self.dialog = Dialog::Error {
-                    message: format!("Move/Rename failed: {}", e),
-                };
-            }
-        }
+        self.fs_job = Some(fileops::spawn(OpKind::Move, items));
+        self.status_message = "Moving…".to_string();
     }
 
     pub fn initiate_mkdir(&mut self) {
@@ -947,6 +1220,41 @@ impl App {
         }
     }
 
+    pub fn initiate_touch(&mut self) {
+        self.dialog = Dialog::InputTouch {
+            input: InputField::new(String::new()),
+        };
+    }
+
+    pub fn execute_touch(&mut self, file_name: String) {
+        let trimmed = file_name.trim();
+        if trimmed.is_empty() {
+            self.dialog = Dialog::Error { message: "File name cannot be empty".to_string() };
+            return;
+        }
+
+        let active_dir = self.get_active_panel().path.clone();
+        let target_path = active_dir.join(trimmed);
+        if target_path.exists() {
+            self.dialog = Dialog::Error {
+                message: format!("Error: File or directory '{}' already exists", trimmed),
+            };
+            return;
+        }
+
+        match fs::File::create(&target_path) {
+            Ok(_) => {
+                self.status_message = format!("Created file '{}'", trimmed);
+                self.refresh_panels();
+            }
+            Err(e) => {
+                self.dialog = Dialog::Error {
+                    message: format!("Failed to create file: {}", e),
+                };
+            }
+        }
+    }
+
     pub fn initiate_delete(&mut self) {
         let marked_paths: Vec<PathBuf> = self.get_active_panel().marked.iter().cloned().collect();
         if !marked_paths.is_empty() {
@@ -966,50 +1274,130 @@ impl App {
     pub fn execute_delete(&mut self, path: PathBuf) {
         let marked_paths: Vec<PathBuf> = self.get_active_panel().marked.iter().cloned().collect();
 
-        let result = if !marked_paths.is_empty() {
-            // Bulk delete
-            let mut err = None;
-            for p in &marked_paths {
-                let res = if p.is_dir() {
-                    fs::remove_dir_all(p)
-                } else {
-                    fs::remove_file(p)
-                };
-                if let Err(e) = res {
-                    err = Some(e);
-                    break;
-                }
-            }
-            if let Some(e) = err { Err(e) } else { Ok(()) }
+        let items: Vec<(PathBuf, PathBuf)> = if !marked_paths.is_empty() {
+            marked_paths.into_iter().map(|p| (p, PathBuf::new())).collect()
         } else {
-            // Single delete
-            if path.is_dir() {
-                fs::remove_dir_all(&path)
-            } else {
-                fs::remove_file(&path)
-            }
+            vec![(path, PathBuf::new())]
         };
 
-        match result {
-            Ok(_) => {
-                let count = if !marked_paths.is_empty() { marked_paths.len() } else { 1 };
-                self.status_message = format!("Deleted {} item(s)", count);
-                self.get_active_panel_mut().marked.clear();
-                self.refresh_panels();
+        let (kind, msg) = if self.config.use_trash {
+            (OpKind::Trash, "Moving to trash…")
+        } else {
+            (OpKind::Delete, "Deleting…")
+        };
+        self.fs_job = Some(fileops::spawn(kind, items));
+        self.status_message = msg.to_string();
+    }
+
+    pub fn initiate_properties(&mut self) {
+        if let Some(item) = self.get_active_panel().get_selected_item() {
+            if item.name == ".." {
+                return;
             }
-            Err(e) => {
-                self.dialog = Dialog::Error {
-                    message: format!("Failed to delete: {}", e),
+            let name = item.name.clone();
+            let path = item.path.clone();
+            
+            let metadata = match path.symlink_metadata() {
+                Ok(m) => m,
+                Err(e) => {
+                    self.dialog = Dialog::Error {
+                        message: format!("Failed to read metadata: {}", e),
+                    };
+                    return;
+                }
+            };
+            
+            let size_str = if metadata.is_dir() {
+                "Directory".to_string()
+            } else {
+                format_size(metadata.len())
+            };
+            
+            #[cfg(unix)]
+            let (permissions_str, owner_str) = {
+                use std::os::unix::fs::MetadataExt;
+                let mode = metadata.mode();
+                let uid = metadata.uid();
+                let gid = metadata.gid();
+                
+                let is_dir = metadata.is_dir();
+                let is_symlink = metadata.file_type().is_symlink();
+                
+                let perm = format_permissions(mode, is_dir, is_symlink);
+                let owner = format!("UID: {}, GID: {}", uid, gid);
+                (perm, owner)
+            };
+            
+            #[cfg(not(unix))]
+            let (permissions_str, owner_str) = {
+                let perm = if metadata.permissions().readonly() {
+                    "r--------".to_string()
+                } else {
+                    "rw-------".to_string()
                 };
-            }
+                let owner = "N/A".to_string();
+                (perm, owner)
+            };
+            
+            let path_str = if metadata.file_type().is_symlink() {
+                match fs::read_link(&path) {
+                    Ok(target) => format!("{} -> {}", path.display(), target.display()),
+                    Err(_) => path.display().to_string(),
+                }
+            } else {
+                path.display().to_string()
+            };
+
+            let format_time = |t: std::time::SystemTime| -> String {
+                let datetime: chrono::DateTime<chrono::Local> = t.into();
+                datetime.format("%Y-%m-%d %H:%M:%S").to_string()
+            };
+            
+            let modified_str = metadata.modified().map(format_time).unwrap_or_else(|_| "N/A".to_string());
+            let created_str = metadata.created().map(format_time).unwrap_or_else(|_| "N/A".to_string());
+            
+            self.dialog = Dialog::Properties {
+                name,
+                path_str,
+                size_str,
+                permissions_str,
+                modified_str,
+                created_str,
+                owner_str,
+            };
         }
     }
 }
 
+fn format_permissions(mode: u32, is_dir: bool, is_symlink: bool) -> String {
+    let mut s = String::with_capacity(10);
+    if is_dir {
+        s.push('d');
+    } else if is_symlink {
+        s.push('l');
+    } else {
+        s.push('-');
+    }
+    
+    let chars = ['r', 'w', 'x'];
+    for i in (0..3).rev() {
+        let shift = i * 3;
+        let bits = (mode >> shift) & 0o7;
+        s.push(if bits & 4 != 0 { chars[0] } else { '-' });
+        s.push(if bits & 2 != 0 { chars[1] } else { '-' });
+        s.push(if bits & 1 != 0 { chars[2] } else { '-' });
+    }
+    s
+}
+
+
 // Suspension editor helper
 pub fn edit_file(path: &Path, editor_bin: &str) -> io::Result<()> {
-    disable_raw_mode()?;
-    execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture, crossterm::cursor::Show)?;
+    let is_test = cfg!(test) || std::env::var("RC_TEST_MULTIPLEXER_BIN").is_ok();
+    if !is_test {
+        disable_raw_mode()?;
+        execute!(io::stdout(), LeaveAlternateScreen, DisableMouseCapture, crossterm::cursor::Show)?;
+    }
     
     let mut child = std::process::Command::new(editor_bin)
         .arg(path)
@@ -1017,12 +1405,13 @@ pub fn edit_file(path: &Path, editor_bin: &str) -> io::Result<()> {
         
     let status = child.wait()?;
     
-    enable_raw_mode()?;
-    execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture, crossterm::cursor::Hide)?;
+    if !is_test {
+        enable_raw_mode()?;
+        execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture, crossterm::cursor::Hide)?;
+    }
     
     if !status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
+        return Err(io::Error::other(
             format!("Editor '{}' exited with non-zero status", editor_bin),
         ));
     }
@@ -1030,40 +1419,91 @@ pub fn edit_file(path: &Path, editor_bin: &str) -> io::Result<()> {
     Ok(())
 }
 
+// Spawns the editor in a split pane of tmux/wezterm/zellij if split layout is active,
+// otherwise suspends alternate screen and runs in foreground (blocking).
+pub fn edit_file_external(path: &Path, editor_bin: &str, split: bool) -> io::Result<bool> {
+    if split {
+        // 1. TMUX split
+        if std::env::var("TMUX").is_ok() {
+            let bin = std::env::var("RC_TEST_MULTIPLEXER_BIN").unwrap_or_else(|_| "tmux".to_string());
+            let mut cmd = std::process::Command::new(&bin);
+            cmd.arg("split-window")
+               .arg("-h")
+               .arg(editor_bin)
+               .arg(path);
+            if let Ok(mut child) = cmd.spawn() {
+                let _ = child.wait();
+                return Ok(true);
+            }
+        }
+
+        // 2. ZELLIJ pane
+        if std::env::var("ZELLIJ").is_ok() {
+            let bin = std::env::var("RC_TEST_MULTIPLEXER_BIN").unwrap_or_else(|_| "zellij".to_string());
+            let mut cmd = std::process::Command::new(&bin);
+            cmd.arg("edit")
+               .arg(path);
+            if let Ok(mut child) = cmd.spawn() {
+                let _ = child.wait();
+                return Ok(true);
+            }
+        }
+
+        // 3. WEZTERM split
+        if std::env::var("WEZTERM_PANE").is_ok() {
+            let bin = std::env::var("RC_TEST_MULTIPLEXER_BIN").unwrap_or_else(|_| {
+                let default_bin = "wezterm";
+                let has_in_path = if let Ok(paths) = std::env::var("PATH") {
+                    std::env::split_paths(&paths).any(|p| p.join(default_bin).exists())
+                } else {
+                    false
+                };
+                if !has_in_path && std::path::Path::new("/Applications/WezTerm.app/Contents/MacOS/wezterm").exists() {
+                    "/Applications/WezTerm.app/Contents/MacOS/wezterm".to_string()
+                } else {
+                    default_bin.to_string()
+                }
+            });
+            let mut cmd = std::process::Command::new(&bin);
+            cmd.arg("cli")
+               .arg("split-pane")
+               .arg("--")
+               .arg(editor_bin)
+               .arg(path);
+            if let Ok(mut child) = cmd.spawn() {
+                let _ = child.wait();
+                return Ok(true);
+            }
+        }
+    }
+
+    // Default fullscreen suspend-and-run
+    edit_file(path, editor_bin)?;
+    Ok(false)
+}
+
 // Menu dropdown actions router
-pub fn execute_menu_action(app: &mut App, menu_idx: usize, item_idx: usize, _terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
+pub fn execute_menu_action<B: ratatui::backend::Backend>(app: &mut App, menu_idx: usize, item_idx: usize, terminal: &mut Terminal<B>) {
     app.dialog = Dialog::None; // Close menu state
     match menu_idx {
-        0 => { // Left Panel Config
+        0 => { // Focused pane config (menu "Left")
+            let p = app.get_active_panel_mut();
             match item_idx {
-                0 => {
-                    app.left_panel.show_hidden = !app.left_panel.show_hidden;
-                    app.left_panel.refresh();
-                }
-                1 => {
-                    app.left_panel.sort_by = "name".to_string();
-                    app.left_panel.refresh();
-                }
-                2 => {
-                    app.left_panel.sort_by = "size".to_string();
-                    app.left_panel.refresh();
-                }
-                3 => {
-                    app.left_panel.sort_by = "time".to_string();
-                    app.left_panel.refresh();
-                }
+                0 => { p.show_hidden = !p.show_hidden; p.refresh(); }
+                1 => { p.sort_by = "name".to_string(); p.refresh(); }
+                2 => { p.sort_by = "size".to_string(); p.refresh(); }
+                3 => { p.sort_by = "time".to_string(); p.refresh(); }
                 _ => {}
             }
         }
         1 => { // File Actions
             match item_idx {
                 0 => {
-                    if let Some(item) = app.get_active_panel().get_selected_item().cloned() {
-                        if !item.is_dir { app.open_viewer(item.path); }
-                    }
+                    if let Some(item) = app.get_active_panel().get_selected_item().cloned()
+                        && !item.is_dir { app.open_viewer(item.path); }
                 }
                 1 => {
-                    app.open_editor();
+                    app.open_editor(terminal);
                 }
                 2 => {
                     app.initiate_copy();
@@ -1118,27 +1558,130 @@ pub fn execute_menu_action(app: &mut App, menu_idx: usize, item_idx: usize, _ter
                 _ => {}
             }
         }
-        4 => { // Right Panel Config
+        4 => { // Partner pane config (menu "Right")
+            app.ensure_partner();
+            let id = app.partner;
+            let p = app.panel_mut(id);
             match item_idx {
-                0 => {
-                    app.right_panel.show_hidden = !app.right_panel.show_hidden;
-                    app.right_panel.refresh();
-                }
-                1 => {
-                    app.right_panel.sort_by = "name".to_string();
-                    app.right_panel.refresh();
-                }
-                2 => {
-                    app.right_panel.sort_by = "size".to_string();
-                    app.right_panel.refresh();
-                }
-                3 => {
-                    app.right_panel.sort_by = "time".to_string();
-                    app.right_panel.refresh();
-                }
+                0 => { p.show_hidden = !p.show_hidden; p.refresh(); }
+                1 => { p.sort_by = "name".to_string(); p.refresh(); }
+                2 => { p.sort_by = "size".to_string(); p.refresh(); }
+                3 => { p.sort_by = "time".to_string(); p.refresh(); }
                 _ => {}
             }
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn app_in(tag: &str) -> (PathBuf, App) {
+        let root = std::env::temp_dir()
+            .join(format!("rc_app_{}_{}", tag, chrono::Utc::now().timestamp_micros()));
+        fs::create_dir_all(root.join("left")).unwrap();
+        fs::create_dir_all(root.join("right")).unwrap();
+        let mut app = App::new();
+        // Default workspace = two panes; focus=0, partner=1.
+        let f = app.focus;
+        let _ = app.panel_mut(f).set_path(root.join("left"));
+        let p = app.partner;
+        let _ = app.panel_mut(p).set_path(root.join("right"));
+        (root, app)
+    }
+
+    #[test]
+    fn test_toggle_panel() {
+        let (root, mut app) = app_in("toggle");
+        let a = app.focus;
+        app.toggle_panel();
+        assert_ne!(app.focus, a);
+        app.toggle_panel();
+        assert_eq!(app.focus, a);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_sync_panels() {
+        let (root, mut app) = app_in("sync");
+        assert_ne!(app.get_active_panel().path, app.get_inactive_panel().path);
+        app.sync_panels();
+        assert_eq!(app.get_inactive_panel().path, app.get_active_panel().path);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_swap_panels() {
+        let (root, mut app) = app_in("swap");
+        let a = app.get_active_panel().path.clone();
+        let b = app.get_inactive_panel().path.clone();
+        app.swap_panels();
+        assert_eq!(app.get_active_panel().path, b);
+        assert_eq!(app.get_inactive_panel().path, a);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_handle_backspace_goes_to_parent() {
+        let (root, mut app) = app_in("back");
+        let child = app.get_active_panel().path.clone();
+        app.handle_backspace();
+        assert_eq!(app.get_active_panel().path, child.parent().unwrap());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_fs_not_busy_initially() {
+        let (root, app) = app_in("busy");
+        assert!(!app.is_fs_busy());
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_split_and_close() {
+        let (root, mut app) = app_in("split");
+        assert_eq!(app.root.leaves().len(), 2);
+        app.split_focus(Dir::Vertical);
+        assert_eq!(app.root.leaves().len(), 3);
+        // focus is the new pane; partner is the old focus
+        assert!(app.root.contains(app.focus));
+        app.close_focus();
+        assert_eq!(app.root.leaves().len(), 2);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_cannot_close_last_pane() {
+        let (root, mut app) = app_in("last");
+        app.close_focus(); // 2 -> 1
+        assert_eq!(app.root.leaves().len(), 1);
+        app.close_focus(); // refuse
+        assert_eq!(app.root.leaves().len(), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_edit_file_external_fallback() {
+        let path = std::path::PathBuf::from("nonexistent_test_file.txt");
+        let res = edit_file_external(&path, "invalid_editor_bin", false);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_edit_file_external_split_env() {
+        unsafe {
+            std::env::set_var("TMUX", "1");
+            std::env::set_var("RC_TEST_MULTIPLEXER_BIN", "true");
+        }
+        let path = std::path::PathBuf::from("nonexistent_test_file.txt");
+        let res = edit_file_external(&path, "true", true);
+        assert_eq!(res.ok(), Some(true));
+        unsafe {
+            std::env::remove_var("TMUX");
+            std::env::remove_var("RC_TEST_MULTIPLEXER_BIN");
+        }
     }
 }
