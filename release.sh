@@ -47,7 +47,8 @@ fi
 # =============================================================================
 step "Current state"
 
-CURRENT_VERSION=$(grep '^version' "$CARGO_TOML" | head -1 | sed 's/.*= *"\(.*\)"/\1/')
+# Robust package version extraction (restricted to [package] section)
+CURRENT_VERSION=$(awk -F '"' '/^\[package\]/{p=1;next}/^\[/{p=0}/^version *=/{if(p){print $2;exit}}' "$CARGO_TOML")
 CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
 UNCOMMITTED=$(git status --porcelain)
 
@@ -69,7 +70,11 @@ if [[ -n "$UNCOMMITTED" ]]; then
         git commit -m "$COMMIT_MSG"
         ok "Committed."
     else
-        warn "Proceeding with uncommitted changes (they won't be in the release)."
+        warn "Proceeding with uncommitted changes!"
+        warn "WARNING: Your compiled release binary WILL include these uncommitted local changes,"
+        warn "but those changes WILL NOT be included in the git source tag!"
+        warn "This can result in your release binary and source code tag falling out of sync."
+        echo ""
     fi
 fi
 
@@ -201,6 +206,15 @@ else
 fi
 
 # =============================================================================
+# 5.5 Run Unit Tests
+# =============================================================================
+step "Running unit tests (cargo test)"
+if ! cargo test; then
+    die "Tests failed. Refusing to release broken build."
+fi
+ok "All tests passed successfully."
+
+# =============================================================================
 # 6. Build release binary
 # =============================================================================
 step "Building release binary (cargo build --release)"
@@ -232,13 +246,19 @@ step "Tagging v${NEW_VERSION}"
 
 TAG="v${NEW_VERSION}"
 
-if git rev-parse "$TAG" &>/dev/null; then
-    warn "Tag ${TAG} already exists."
-    ask "Delete and re-create it? [y/N]"
+TAG_EXISTS_LOCAL=$(git rev-parse "$TAG" &>/dev/null && echo "true" || echo "false")
+TAG_EXISTS_REMOTE=$(git ls-remote --tags origin "$TAG" 2>/dev/null | grep -q "refs/tags/${TAG}" && echo "true" || echo "false")
+
+if [[ "$TAG_EXISTS_LOCAL" == "true" || "$TAG_EXISTS_REMOTE" == "true" ]]; then
+    warn "Tag ${TAG} already exists (local: ${TAG_EXISTS_LOCAL}, remote: ${TAG_EXISTS_REMOTE})."
+    ask "Delete and re-create it locally and on remote? [y/N]"
     read -r DEL_TAG
     if [[ "$DEL_TAG" =~ ^[Yy]$ ]]; then
-        git tag -d "$TAG"
+        if [[ "$TAG_EXISTS_LOCAL" == "true" ]]; then
+            git tag -d "$TAG"
+        fi
         git push origin ":refs/tags/${TAG}" 2>/dev/null || true
+        ok "Deleted existing tag ${TAG} locally and on origin remote."
     else
         die "Aborted. Tag already exists."
     fi
@@ -261,7 +281,12 @@ BIN_SRC="target/release/rc"
 cp "$BIN_SRC" "${DIST_DIR}/rc"
 chmod +x "${DIST_DIR}/rc"
 
-ARCHIVE="rc-macos.tar.gz"
+OS_TYPE=$(uname -s | tr '[:upper:]' '[:lower:]')
+case "$OS_TYPE" in
+    darwin) ARCHIVE="rc-macos.tar.gz" ;;
+    linux) ARCHIVE="rc-linux.tar.gz" ;;
+    *) ARCHIVE="rc-${OS_TYPE}.tar.gz" ;;
+esac
 tar -czf "${ARCHIVE}" -C "${DIST_DIR}" rc
 rm -rf "${DIST_DIR}"
 ok "Packaged: ${ARCHIVE} ($(du -sh "$ARCHIVE" | cut -f1))"
