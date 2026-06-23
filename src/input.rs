@@ -12,7 +12,6 @@ use ratatui::{
 
 use crate::app::*;
 use crate::config::*;
-use crate::panel::*;
 use crate::types::*;
 use crate::ui::{ui, centered_rect};
 
@@ -20,18 +19,75 @@ use crate::ui::{ui, centered_rect};
 // Keyboard Inputs Router
 // =============================================================================
 
+/// The workspace rectangle (between the 1-row header and the 2-row status/legend
+/// footer), matching the layout in `ui()`.
+fn workspace_area<B: ratatui::backend::Backend>(terminal: &Terminal<B>) -> Rect {
+    let (w, h) = match terminal.size() {
+        Ok(s) => (s.width, s.height),
+        Err(_) => (80, 24),
+    };
+    Rect::new(0, 1, w, h.saturating_sub(3))
+}
+
+/// True if a cell falls within (or one cell either side of) a 1px seam.
+fn hit(seam: Rect, col: u16, row: u16) -> bool {
+    let x0 = seam.x.saturating_sub(1);
+    let x1 = seam.x + seam.width;
+    let y0 = seam.y;
+    let y1 = seam.y + seam.height;
+    col >= x0 && col <= x1 && row >= y0 && row < y1
+}
+
 pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: App) -> io::Result<()> {
-    let mut tick: u32 = 0;
+    // Event-driven refresh via notify, with a slow periodic fallback if the
+    // platform watcher can't be set up.
+    let mut watcher = crate::watcher::FsWatcher::new();
+    let mut dirty = false;
+    let mut dirty_since = std::time::Instant::now();
+    let mut last_fallback = std::time::Instant::now();
+    const DEBOUNCE: Duration = Duration::from_millis(150);
+    const FALLBACK: Duration = Duration::from_secs(4);
+
+    // Active divider drag: (split path, split area, direction).
+    let mut drag: Option<(Vec<u8>, Rect, crate::layout::Dir)> = None;
+
     loop {
         // Drain output from any running background process
         app.drain_process_output();
 
-        // Auto-refresh panels every ~2s to pick up external filesystem changes
-        tick = tick.wrapping_add(1);
-        if tick % 40 == 0 {
-            if matches!(app.dialog, Dialog::None) {
+        // Drain progress from any running background filesystem job
+        app.drain_fs_job();
+
+        // Drain loaded previews
+        if app.drain_previews() {
+            dirty = true;
+            dirty_since = std::time::Instant::now();
+        }
+
+        let idle = matches!(app.dialog, Dialog::None) && !app.is_fs_busy();
+
+        // Keep the watcher pointed at the two visible panel directories.
+        if let Some(w) = watcher.as_mut() {
+            w.sync_paths(&app.watch_dirs());
+            if w.drain() {
+                dirty = true;
+                dirty_since = std::time::Instant::now();
+            }
+        }
+
+        // Refresh after a quiet period (coalesces bursts of external writes).
+        if idle && dirty && dirty_since.elapsed() >= DEBOUNCE {
+            app.refresh_panels();
+            dirty = false;
+        }
+
+        // Fallback poll: primary path when there is no watcher, and a safety net
+        // even when there is (catches anything the backend may miss).
+        if idle && last_fallback.elapsed() >= FALLBACK {
+            if watcher.is_none() || !dirty {
                 app.refresh_panels();
             }
+            last_fallback = std::time::Instant::now();
         }
 
         terminal.draw(|f| ui(f, &mut app))?;
@@ -78,6 +134,76 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                     _ => {}
                 }
             }
+
+            // Main-view mouse: click to focus/select, click-again to open,
+            // wheel to scroll, drag a seam to resize, click header to open menu.
+            if matches!(app.dialog, Dialog::None) && !app.is_fs_busy() {
+                use crossterm::event::{MouseButton, MouseEventKind};
+                let (col, row) = (mouse.column, mouse.row);
+                match mouse.kind {
+                    MouseEventKind::Down(MouseButton::Left) => {
+                        if row == 0 {
+                            // Header row → open the menu bar.
+                            app.dialog = Dialog::Menu { active_menu: 0, active_item: None };
+                            continue;
+                        }
+                        // Start a divider drag if the click landed on a seam.
+                        let ws = workspace_area(terminal);
+                        if let Some(d) = app
+                            .root
+                            .dividers(ws)
+                            .into_iter()
+                            .find(|d| hit(d.rect, col, row))
+                        {
+                            drag = Some((d.path, d.area, d.dir));
+                            continue;
+                        }
+                        // Otherwise focus the pane and select the item under the cursor.
+                        if let Some((id, rect)) = app.pane_at(col, row) {
+                            if app.tree_mode && id == app.root.first_leaf() {
+                                app.click_tree(rect, row);
+                            } else {
+                                let activate = app.click_pane(id, rect, row);
+                                if activate {
+                                    app.handle_enter_or_right(terminal, true);
+                                }
+                            }
+                        }
+                        continue;
+                    }
+                    MouseEventKind::Drag(MouseButton::Left) => {
+                        if let Some((path, area, dir)) = &drag {
+                            let ratio = match dir {
+                                crate::layout::Dir::Horizontal => {
+                                    col.saturating_sub(area.x) as f32 / area.width.max(1) as f32
+                                }
+                                crate::layout::Dir::Vertical => {
+                                    row.saturating_sub(area.y) as f32 / area.height.max(1) as f32
+                                }
+                            };
+                            app.root.set_ratio(path, ratio);
+                        }
+                        continue;
+                    }
+                    MouseEventKind::Up(MouseButton::Left) => {
+                        drag = None;
+                        continue;
+                    }
+                    MouseEventKind::ScrollDown => {
+                        if let Some((id, _)) = app.pane_at(col, row) {
+                            app.scroll_pane(id, true);
+                        }
+                        continue;
+                    }
+                    MouseEventKind::ScrollUp => {
+                        if let Some((id, _)) = app.pane_at(col, row) {
+                            app.scroll_pane(id, false);
+                        }
+                        continue;
+                    }
+                    _ => {}
+                }
+            }
         }
 
         let key = match event {
@@ -89,19 +215,33 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
             continue;
         }
 
-        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if !matches!(app.dialog, Dialog::TerminalOverlay { .. }) {
-                app.should_quit = true;
+        // While a background fs job runs, the UI is modal: only allow cancel.
+        if app.is_fs_busy() {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('C') => app.cancel_fs_job(),
+                _ => {}
             }
+            continue;
         }
 
-        let active_dir = match app.active_panel {
-            ActivePanel::Left => app.left_panel.path.clone(),
-            ActivePanel::Right => app.right_panel.path.clone(),
+        if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL)
+            && !matches!(app.dialog, Dialog::TerminalOverlay { .. }) {
+                app.should_quit = true;
+            }
+
+        let active_dir = app.get_active_panel().path.clone();
+
+        let is_view_file_unfocused = if let Dialog::ViewFile { focused: false, .. } = &app.dialog {
+            key.code != KeyCode::Esc && key.code != KeyCode::F(3) && key.code != KeyCode::Tab
+        } else {
+            false
         };
 
-        // Route key events depending on dialog state
-        match &mut app.dialog {
+        if is_view_file_unfocused {
+            handle_main_keys(&mut app, key, terminal);
+        } else {
+            // Route key events depending on dialog state
+            match &mut app.dialog {
                 Dialog::None => handle_main_keys(&mut app, key, terminal),
                 Dialog::ConfirmDelete { item_path, .. } => {
                     let path = item_path.clone();
@@ -132,6 +272,29 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                     KeyCode::Delete => input.delete(),
                     KeyCode::Left => input.move_left(),
                     KeyCode::Right => input.move_right(),
+                    _ => {}
+                },
+                Dialog::InputTouch { input } => match key.code {
+                    KeyCode::Enter => {
+                        let text = input.text.clone();
+                        app.dialog = Dialog::None;
+                        app.execute_touch(text);
+                    }
+                    KeyCode::Esc => {
+                        app.dialog = Dialog::None;
+                        app.status_message = "Cancelled".to_string();
+                    }
+                    KeyCode::Char(c) => input.insert(c),
+                    KeyCode::Backspace => input.backspace(),
+                    KeyCode::Delete => input.delete(),
+                    KeyCode::Left => input.move_left(),
+                    KeyCode::Right => input.move_right(),
+                    _ => {}
+                },
+                Dialog::Properties { .. } => match key.code {
+                    KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => {
+                        app.dialog = Dialog::None;
+                    }
                     _ => {}
                 },
                 Dialog::ConfirmCopy { source_path, input } => {
@@ -246,7 +409,7 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                             }
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
-                            if *active_row < 6 {
+                            if *active_row < 10 {
                                 *active_row += 1;
                             }
                         }
@@ -277,12 +440,34 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                                     app.config.default_editor = editors[(cur + 1) % editors.len()].to_string();
                                 }
                                 5 => {
+                                    app.config.editor_mode = match app.config.editor_mode.as_str() {
+                                        "internal" => "external".to_string(),
+                                        _ => "internal".to_string(),
+                                    };
+                                }
+                                6 => {
                                     let names = crate::theme::Theme::all_names();
                                     let cur = names.iter().position(|&n| n == app.config.theme).unwrap_or(0);
                                     app.config.theme = names[(cur + 1) % names.len()].to_string();
                                     app.apply_config();
                                 }
-                                6 => {
+                                7 => {
+                                    app.config.border_type = match app.config.border_type.as_str() {
+                                        "plain" => "rounded".to_string(),
+                                        "rounded" => "thick".to_string(),
+                                        "thick" => "double".to_string(),
+                                        _ => "plain".to_string(),
+                                    };
+                                    app.apply_config();
+                                }
+                                8 => {
+                                    app.config.use_nerd_fonts = !app.config.use_nerd_fonts;
+                                    app.apply_config();
+                                }
+                                9 => {
+                                    app.config.split_editor = !app.config.split_editor;
+                                }
+                                10 => {
                                     let _ = save_config(&app.config);
                                     app.apply_config();
                                     app.dialog = Dialog::None;
@@ -336,8 +521,8 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                             app.status_message = "Folder is already bookmarked".to_string();
                         }
                     }
-                    KeyCode::Char('d') | KeyCode::Char('D') => {
-                        if !app.config.bookmarks.is_empty() {
+                    KeyCode::Char('d') | KeyCode::Char('D')
+                        if !app.config.bookmarks.is_empty() => {
                             app.config.bookmarks.remove(*selected_idx);
                             let _ = save_config(&app.config);
                             if *selected_idx > 0 && *selected_idx >= app.config.bookmarks.len() {
@@ -345,7 +530,6 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                             }
                             app.status_message = "Removed bookmark".to_string();
                         }
-                    }
                     _ => {}
                 }
                 Dialog::TerminalOverlay { input, output_lines, scroll_offset, command_history, history_index } => {
@@ -378,7 +562,7 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                         KeyCode::Enter => {
                             let text = input.text.clone();
                             if !text.is_empty() {
-                                if command_history.last().map_or(true, |last| last != &text) {
+                                if command_history.last() != Some(&text) {
                                     command_history.push(text.clone());
                                 }
                                 *history_index = None;
@@ -395,8 +579,8 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                                         output_lines.push(format!("→ {}", home_path.display()));
                                         cd_target = Some(home_path);
                                     }
-                                } else if trimmed.starts_with("cd ") {
-                                    let target = trimmed["cd ".len()..].trim();
+                                } else if let Some(rest) = trimmed.strip_prefix("cd ") {
+                                    let target = rest.trim();
                                     let target = if (target.starts_with('\'') && target.ends_with('\''))
                                         || (target.starts_with('"') && target.ends_with('"')) {
                                         if target.len() >= 2 { &target[1..target.len()-1] } else { target }
@@ -423,10 +607,18 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                                             output_lines.push(format!("Not a directory: {}", p.display()));
                                         }
                                     }
+                                } else if app.running_process.is_some() {
+                                    // Don't clobber a streaming child (would orphan it
+                                    // and leak its reader threads).
+                                    output_lines.push(format!("❯ {}", text));
+                                    output_lines.push(
+                                        "⚠ A command is still running — press Ctrl+C to stop it first."
+                                            .to_string(),
+                                    );
                                 } else {
                                     output_lines.push(format!("❯ {}", text));
 
-                                    let expanded_cmd = if let Some(home) = env::var("HOME").ok() {
+                                    let expanded_cmd = if let Ok(home) = env::var("HOME") {
                                         text.replace("~/", &format!("{}/", home))
                                     } else {
                                         text.clone()
@@ -514,19 +706,29 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                     }
                 }
                 Dialog::InternalEditor { file_path, lines, cursor_row, cursor_col, scroll_row, scroll_col, modified } => {
-                    let editor_height = {
-                        let area = match terminal.size() {
-                            Ok(size) => centered_rect(95, 90, Rect::new(0, 0, size.width, size.height)),
-                            Err(_) => centered_rect(95, 90, Rect::new(0, 0, 80, 24)),
+                    let (editor_width, editor_height) = {
+                        let area = if app.config.split_editor && app.leaf_rects.len() > 1 {
+                            app.leaf_rects.iter()
+                                .find(|(id, _)| *id == app.partner)
+                                .map(|(_, r)| *r)
+                                .unwrap_or_else(|| {
+                                    let rect = match terminal.size() {
+                                        Ok(s) => Rect::new(0, 0, s.width, s.height),
+                                        Err(_) => Rect::new(0, 0, 80, 24),
+                                    };
+                                    centered_rect(95, 90, rect)
+                                })
+                        } else {
+                            let rect = match terminal.size() {
+                                Ok(s) => Rect::new(0, 0, s.width, s.height),
+                                Err(_) => Rect::new(0, 0, 80, 24),
+                            };
+                            centered_rect(95, 90, rect)
                         };
-                        area.height.saturating_sub(4) as usize
-                    };
-                    let editor_width = {
-                        let area = match terminal.size() {
-                            Ok(size) => centered_rect(95, 90, Rect::new(0, 0, size.width, size.height)),
-                            Err(_) => centered_rect(95, 90, Rect::new(0, 0, 80, 24)),
-                        };
-                        area.width.saturating_sub(8) as usize
+                        let line_num_width = format!("{}", lines.len()).len().max(3);
+                        let h = area.height.saturating_sub(2) as usize;
+                        let w = area.width.saturating_sub(2).saturating_sub(line_num_width as u16 + 2) as usize;
+                        (w, h)
                     };
 
                     let mut save_file = false;
@@ -534,15 +736,23 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
 
                     match key.code {
                         KeyCode::Esc => {
+                            // Don't silently discard unsaved work: require an
+                            // explicit Ctrl+Q (discard) or Ctrl+S (save) first.
                             if *modified {
-                                app.status_message = "Editor closed (unsaved changes discarded)".to_string();
+                                app.status_message =
+                                    "Unsaved changes — Ctrl+S to save, Ctrl+Q to discard".to_string();
+                            } else {
+                                close_editor = true;
                             }
-                            close_editor = true;
                         }
                         KeyCode::Char('s') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                             save_file = true;
                         }
                         KeyCode::Char('q') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                            // Explicit discard-and-close.
+                            if *modified {
+                                app.status_message = "Discarded unsaved changes".to_string();
+                            }
                             close_editor = true;
                         }
                         KeyCode::Up => {
@@ -750,29 +960,61 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                         }
                     }
                 }
-                Dialog::ViewFile { scroll_offset, content, .. } => {
+                Dialog::ViewFile { scroll_offset, content, focused, .. } => {
                     let lines_count = content.lines().count();
+                    let visible_lines = {
+                        let area = if app.config.split_editor && app.leaf_rects.len() > 1 {
+                            app.leaf_rects.iter()
+                                .find(|(id, _)| *id == app.partner)
+                                .map(|(_, r)| *r)
+                                .unwrap_or_else(|| {
+                                    let rect = match terminal.size() {
+                                        Ok(s) => Rect::new(0, 0, s.width, s.height),
+                                        Err(_) => Rect::new(0, 0, 80, 24),
+                                    };
+                                    centered_rect(90, 90, rect)
+                                })
+                        } else {
+                            let rect = match terminal.size() {
+                                Ok(s) => Rect::new(0, 0, s.width, s.height),
+                                Err(_) => Rect::new(0, 0, 80, 24),
+                            };
+                            centered_rect(90, 90, rect)
+                        };
+                        area.height.saturating_sub(2) as usize
+                    };
                     match key.code {
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            *scroll_offset = scroll_offset.saturating_sub(1);
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            if *scroll_offset + 5 < lines_count {
-                                *scroll_offset += 1;
-                            }
-                        }
-                        KeyCode::PageUp => {
-                            *scroll_offset = scroll_offset.saturating_sub(15);
-                        }
-                        KeyCode::PageDown => {
-                            if *scroll_offset + 15 < lines_count {
-                                *scroll_offset += 15;
-                            } else {
-                                *scroll_offset = lines_count.saturating_sub(5);
-                            }
-                        }
-                        KeyCode::Esc | KeyCode::Char('q') | KeyCode::F(3) => {
+                        KeyCode::Esc | KeyCode::F(3) => {
                             app.dialog = Dialog::None;
+                        }
+                        KeyCode::Tab => {
+                            *focused = !*focused;
+                        }
+                        _ if *focused => {
+                            match key.code {
+                                KeyCode::Char('q') => {
+                                    app.dialog = Dialog::None;
+                                }
+                                KeyCode::Up | KeyCode::Char('k') => {
+                                    *scroll_offset = scroll_offset.saturating_sub(1);
+                                }
+                                KeyCode::Down | KeyCode::Char('j') => {
+                                    if *scroll_offset + visible_lines < lines_count {
+                                        *scroll_offset += 1;
+                                    }
+                                }
+                                KeyCode::PageUp => {
+                                    *scroll_offset = scroll_offset.saturating_sub(visible_lines);
+                                }
+                                KeyCode::PageDown => {
+                                    if *scroll_offset + visible_lines < lines_count {
+                                        *scroll_offset += visible_lines;
+                                    } else {
+                                        *scroll_offset = lines_count.saturating_sub(visible_lines);
+                                    }
+                                }
+                                _ => {}
+                            }
                         }
                         _ => {}
                     }
@@ -828,6 +1070,7 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                     }
                 }
             }
+        }
 
         if app.should_quit {
             app.kill_running_process();
@@ -839,10 +1082,24 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
 
 
 
-fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<CrosstermBackend<io::Stdout>>) {
+fn handle_main_keys<B: ratatui::backend::Backend>(app: &mut App, key: KeyEvent, terminal: &mut Terminal<B>) {
+    let prev_state = app.focus_snapshot();
+
     let keys = &app.keymap;
 
-    if matches_key(&key, &keys.quit) {
+    if (key.code == KeyCode::Up && (key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::ALT)))
+        || (key.code == KeyCode::Char('p') && key.modifiers.contains(KeyModifiers::SHIFT))
+    {
+        app.preview_scroll_offset = app.preview_scroll_offset.saturating_sub(1);
+    } else if (key.code == KeyCode::Down && (key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::ALT)))
+        || (key.code == KeyCode::Char('n') && key.modifiers.contains(KeyModifiers::SHIFT))
+    {
+        app.preview_scroll_offset = app.preview_scroll_offset.saturating_add(1);
+    } else if key.code == KeyCode::PageUp && key.modifiers.contains(KeyModifiers::SHIFT) {
+        app.preview_scroll_offset = app.preview_scroll_offset.saturating_sub(5);
+    } else if key.code == KeyCode::PageDown && key.modifiers.contains(KeyModifiers::SHIFT) {
+        app.preview_scroll_offset = app.preview_scroll_offset.saturating_add(5);
+    } else if matches_key(&key, &keys.quit) {
         if app.config.confirm_quit {
             app.dialog = Dialog::ConfirmQuit;
         } else {
@@ -851,21 +1108,26 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
     } else if matches_key(&key, &keys.help) {
         app.dialog = Dialog::Help { active_tab: 0 };
     } else if matches_key(&key, &keys.view) {
-        if let Some(item) = app.get_active_panel().get_selected_item().cloned() {
-            if !item.is_dir {
+        if let Some(item) = app.get_active_panel().get_selected_item().cloned()
+            && !item.is_dir {
                 app.open_viewer(item.path);
             }
-        }
     } else if matches_key(&key, &keys.edit) {
-        app.open_editor();
+        app.open_editor(terminal);
     } else if matches_key(&key, &keys.copy) {
         app.initiate_copy();
     } else if matches_key(&key, &keys.move_item) {
         app.initiate_move();
     } else if matches_key(&key, &keys.mkdir) {
-        app.initiate_mkdir();
+        if key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::CONTROL) {
+            app.initiate_touch();
+        } else {
+            app.initiate_mkdir();
+        }
     } else if matches_key(&key, &keys.delete) {
         app.initiate_delete();
+    } else if key.code == KeyCode::F(2) || (key.code == KeyCode::Char('i') && key.modifiers.contains(KeyModifiers::CONTROL)) {
+        app.initiate_properties();
     } else if matches_key(&key, &keys.menu) {
         app.dialog = Dialog::Menu {
             active_menu: 0,
@@ -881,13 +1143,13 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
     } else if key.code == KeyCode::Char('t') && key.modifiers.contains(KeyModifiers::CONTROL) {
         app.tree_mode = !app.tree_mode;
         if app.tree_mode {
+            app.focus_first_pane();
             app.init_tree();
-            app.active_panel = ActivePanel::Left;
             app.update_right_panel_from_tree();
         } else {
-            // Sync left panel to the directory the right panel was showing
-            let right_path = app.right_panel.path.clone();
-            let _ = app.left_panel.set_path(right_path);
+            // On exit, move the focused (tree) pane to the directory the
+            // partner content pane was showing.
+            app.sync_focus_to_partner();
         }
         app.status_message = format!("Tree View: {}", if app.tree_mode { "ON" } else { "OFF" });
     } else if key.code == KeyCode::Char('o') && key.modifiers.contains(KeyModifiers::CONTROL) {
@@ -947,9 +1209,25 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
             }
             app.status_message = format!("Selected {} items", panel.marked.len());
         }
+    } else if key.code == KeyCode::Char('|') {
+        // Split the focused pane into a left | right pair.
+        app.split_focus(crate::layout::Dir::Horizontal);
+    } else if key.code == KeyCode::Char('-') && key.modifiers.is_empty() {
+        // Split the focused pane into a top / bottom pair.
+        app.split_focus(crate::layout::Dir::Vertical);
+    } else if key.code == KeyCode::Char('w') && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.close_focus();
+    } else if key.code == KeyCode::Right && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.resize_focus(true, crate::layout::Dir::Horizontal);
+    } else if key.code == KeyCode::Left && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.resize_focus(false, crate::layout::Dir::Horizontal);
+    } else if key.code == KeyCode::Down && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.resize_focus(true, crate::layout::Dir::Vertical);
+    } else if key.code == KeyCode::Up && key.modifiers.contains(KeyModifiers::CONTROL) {
+        app.resize_focus(false, crate::layout::Dir::Vertical);
     } else if matches_key(&key, &keys.select_item) {
-        if let Some(item) = app.get_active_panel().get_selected_item().cloned() {
-            if item.name != ".." {
+        if let Some(item) = app.get_active_panel().get_selected_item().cloned()
+            && item.name != ".." {
                 let panel = app.get_active_panel_mut();
                 if panel.marked.contains(&item.path) {
                     panel.marked.remove(&item.path);
@@ -958,9 +1236,8 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
                 }
                 panel.select_next();
             }
-        }
     } else if matches_key(&key, &keys.up) {
-        if app.tree_mode && app.active_panel == ActivePanel::Left {
+        if app.tree_mode && app.is_tree_pane_focused() {
             if app.tree_selected > 0 {
                 app.tree_selected -= 1;
                 app.update_right_panel_from_tree();
@@ -969,7 +1246,7 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
             app.get_active_panel_mut().select_prev();
         }
     } else if matches_key(&key, &keys.down) {
-        if app.tree_mode && app.active_panel == ActivePanel::Left {
+        if app.tree_mode && app.is_tree_pane_focused() {
             if app.tree_selected + 1 < app.tree_nodes.len() {
                 app.tree_selected += 1;
                 app.update_right_panel_from_tree();
@@ -978,7 +1255,7 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
             app.get_active_panel_mut().select_next();
         }
     } else if matches_key(&key, &keys.left) {
-        if app.tree_mode && app.active_panel == ActivePanel::Left {
+        if app.tree_mode && app.is_tree_pane_focused() {
             let idx = app.tree_selected;
             if idx < app.tree_nodes.len() {
                 if app.tree_nodes[idx].is_expanded {
@@ -1000,10 +1277,11 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
             app.handle_backspace();
         }
     } else if matches_key(&key, &keys.right) {
-        if app.tree_mode && app.active_panel == ActivePanel::Left {
+        if app.tree_mode && app.is_tree_pane_focused() {
             app.toggle_tree_node();
         } else {
-            app.handle_enter(terminal);
+            let is_enter = key.code == KeyCode::Enter;
+            app.handle_enter_or_right(terminal, is_enter);
         }
     } else if matches_key(&key, &keys.tab) {
         app.toggle_panel();
@@ -1011,7 +1289,7 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
         // Fallback controls
         match key.code {
             KeyCode::PageUp => {
-                if app.tree_mode && app.active_panel == ActivePanel::Left {
+                if app.tree_mode && app.is_tree_pane_focused() {
                     app.tree_selected = app.tree_selected.saturating_sub(10);
                     app.update_right_panel_from_tree();
                 } else {
@@ -1019,7 +1297,7 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
                 }
             }
             KeyCode::PageDown => {
-                if app.tree_mode && app.active_panel == ActivePanel::Left {
+                if app.tree_mode && app.is_tree_pane_focused() {
                     if !app.tree_nodes.is_empty() {
                         app.tree_selected = std::cmp::min(app.tree_selected + 10, app.tree_nodes.len() - 1);
                         app.update_right_panel_from_tree();
@@ -1029,7 +1307,7 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
                 }
             }
             KeyCode::Home => {
-                if app.tree_mode && app.active_panel == ActivePanel::Left {
+                if app.tree_mode && app.is_tree_pane_focused() {
                     app.tree_selected = 0;
                     app.update_right_panel_from_tree();
                 } else {
@@ -1037,7 +1315,7 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
                 }
             }
             KeyCode::End => {
-                if app.tree_mode && app.active_panel == ActivePanel::Left {
+                if app.tree_mode && app.is_tree_pane_focused() {
                     if !app.tree_nodes.is_empty() {
                         app.tree_selected = app.tree_nodes.len() - 1;
                         app.update_right_panel_from_tree();
@@ -1057,6 +1335,7 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
                 };
             }
             KeyCode::Char('r') => {
+                app.reset_git_query_all();
                 app.refresh_panels();
                 app.status_message = "Panels reloaded".to_string();
             }
@@ -1070,6 +1349,20 @@ fn handle_main_keys(app: &mut App, key: KeyEvent, terminal: &mut Terminal<Crosst
                 }
             }
             _ => {}
+        }
+    }
+
+    let new_state = app.focus_snapshot();
+    if prev_state != new_state {
+        app.preview_scroll_offset = 0;
+        let selected_item = app.get_active_panel().get_selected_item().cloned();
+        if let Some(item) = selected_item {
+            if let Dialog::ViewFile { path, content, scroll_offset, .. } = &mut app.dialog {
+                *path = item.path.clone();
+                *content = "\n  Loading preview...".to_string();
+                *scroll_offset = 0;
+                app.trigger_async_preview(item.path.clone(), 120, 40);
+            }
         }
     }
 }
@@ -1097,7 +1390,7 @@ fn copy_to_clipboard(text: &str) -> bool {
             }
             return child.wait().map(|s| s.success()).unwrap_or(false);
         }
-        return false;
+        false
     }
 
     #[cfg(not(target_os = "macos"))]
