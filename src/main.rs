@@ -44,10 +44,11 @@ fn print_help() {
         "\x1b[1;36mRust Commander\x1b[0m v{VERSION}  —  dual-pane TUI file manager\n\
          \n\
          \x1b[1mUSAGE:\x1b[0m\n\
-         \x1b[36m  rc\x1b[0m                Launch the file manager\n\
-         \x1b[36m  rc update\x1b[0m          Self-update to the latest release\n\
-         \x1b[36m  rc -h, --help\x1b[0m      Show this help\n\
-         \x1b[36m  rc -V, --version\x1b[0m   Print version\n\
+         \x1b[36m  rc [DIR]              \x1b[0m Launch the file manager [optionally in DIR]\n\
+         \x1b[36m  rc -w, --write-last-dir <FILE>\x1b[0m Write the last visited directory to FILE on exit\n\
+         \x1b[36m  rc update             \x1b[0m Self-update to the latest release\n\
+         \x1b[36m  rc -h, --help         \x1b[0m Show this help\n\
+         \x1b[36m  rc -V, --version      \x1b[0m Print version\n\
          \n\
          \x1b[1mKEYBOARDS:\x1b[0m\n\
          \x1b[36m  F1\x1b[0m  Help    \x1b[36mF2\x1b[0m  Props   \x1b[36mF3\x1b[0m  View    \x1b[36mF4\x1b[0m  Edit\n\
@@ -178,10 +179,13 @@ fn self_update() -> Result<(), Box<dyn std::error::Error>> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut write_last_dir = None;
+    let mut starting_dir = None;
+    let mut i = 1;
     let args: Vec<String> = env::args().collect();
 
-    if args.len() > 1 {
-        match args[1].as_str() {
+    while i < args.len() {
+        match args[i].as_str() {
             "-h" | "--help" | "help" => {
                 print_help();
                 return Ok(());
@@ -193,10 +197,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             "update" | "self-update" => {
                 return self_update();
             }
+            "--write-last-dir" | "-w" => {
+                if i + 1 < args.len() {
+                    write_last_dir = Some(PathBuf::from(&args[i + 1]));
+                    i += 2;
+                } else {
+                    eprintln!("Error: Option '{}' requires a path argument.", args[i]);
+                    std::process::exit(1);
+                }
+            }
             other => {
-                eprintln!("Unknown argument: {other}");
-                eprintln!("Run \x1b[1mrc --help\x1b[0m for usage.");
-                std::process::exit(1);
+                if other.starts_with('-') {
+                    eprintln!("Unknown argument: {other}");
+                    eprintln!("Run \x1b[1mrc --help\x1b[0m for usage.");
+                    std::process::exit(1);
+                } else if starting_dir.is_none() {
+                    starting_dir = Some(PathBuf::from(other));
+                    i += 1;
+                } else {
+                    eprintln!("Error: Multiple starting directories specified.");
+                    std::process::exit(1);
+                }
             }
         }
     }
@@ -207,7 +228,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let app = App::new();
+    let app = App::new_with_options(write_last_dir, starting_dir);
     let res = run_app(&mut terminal, app);
 
     disable_raw_mode()?;

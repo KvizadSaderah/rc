@@ -3,6 +3,13 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::sync::mpsc;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
+
+use syntect::easy::HighlightLines;
+use syntect::parsing::SyntaxSet;
+use syntect::highlighting::ThemeSet;
+use syntect::util::{as_24_bit_terminal_escaped, LinesWithEndings};
+
 
 use crossterm::{
     event::{DisableMouseCapture, EnableMouseCapture},
@@ -58,14 +65,70 @@ pub struct App {
     pub running_process: Option<RunningProcess>,
     pub preview_scroll_offset: usize,
     pub fs_job: Option<JobState>,
+    pub write_last_dir: Option<PathBuf>,
+    pub image_picker: Option<ratatui_image::picker::Picker>,
+}
+
+static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
+static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
+
+fn get_syntax_set() -> &'static SyntaxSet {
+    SYNTAX_SET.get_or_init(|| SyntaxSet::load_defaults_newlines())
+}
+
+fn get_theme_set() -> &'static ThemeSet {
+    THEME_SET.get_or_init(|| ThemeSet::load_defaults())
+}
+
+fn highlight_file(path: &Path, _cols: u16, max_lines: u16) -> Option<String> {
+    let extension = path.extension().and_then(|ext| ext.to_str()).unwrap_or("").to_lowercase();
+    let ps = get_syntax_set();
+    let ts = get_theme_set();
+
+    let syntax = ps.find_syntax_by_extension(&extension)
+        .or_else(|| ps.find_syntax_by_first_line(path.to_str().unwrap_or("")))
+        .unwrap_or_else(|| ps.find_syntax_plain_text());
+
+    // Use Ocean theme as default
+    let theme = ts.themes.get("base16-ocean.dark")
+        .or_else(|| ts.themes.values().next())?;
+
+    let file = std::fs::File::open(path).ok()?;
+    let mut content = String::new();
+    use std::io::Read;
+    // Limit to reading max 150 KB for safety
+    file.take(150 * 1024).read_to_string(&mut content).ok()?;
+
+    let mut h = HighlightLines::new(syntax, theme);
+    let mut output = String::new();
+    let mut line_count = 0;
+
+    for line in LinesWithEndings::from(&content) {
+        if line_count >= max_lines {
+            break;
+        }
+        let ranges = h.highlight_line(line, ps).ok()?;
+        let escaped = as_24_bit_terminal_escaped(&ranges, true);
+        output.push_str(&escaped);
+        line_count += 1;
+    }
+
+    Some(output)
 }
 
 impl App {
+    #[allow(dead_code)]
     pub fn new() -> Self {
+        Self::new_with_options(None, None)
+    }
+
+    pub fn new_with_options(write_last_dir: Option<PathBuf>, starting_dir: Option<PathBuf>) -> Self {
         let config = load_config();
         let keymap = load_keymap(&config);
         
-        let mut current_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let mut current_dir = starting_dir.unwrap_or_else(|| {
+            env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        });
         if !current_dir.exists() {
             while !current_dir.exists() {
                 if let Some(parent) = current_dir.parent() {
@@ -104,8 +167,11 @@ impl App {
             running_process: None,
             preview_scroll_offset: 0,
             fs_job: None,
+            write_last_dir,
+            image_picker: ratatui_image::picker::Picker::from_query_stdio().ok(),
         }
     }
+
 
     /// True while a background copy/move/delete job is running.
     pub fn is_fs_busy(&self) -> bool {
@@ -806,23 +872,50 @@ impl App {
     pub fn drain_previews(&mut self) -> bool {
         let mut got_any = false;
         while let Ok(res) = self.preview_rx.try_recv() {
-            // 1. Update preview_state (for quick-view pane)
-            if let PreviewState::Loading { ref path, width, height } = self.preview_state {
-                if path == &res.path && width == res.width && height == res.height {
-                    self.preview_state = PreviewState::Ready {
-                        path: res.path.clone(),
-                        width: res.width,
-                        height: res.height,
-                        content: res.content.clone(),
-                    };
-                    got_any = true;
+            match res.content {
+                PreviewContent::Text(text) => {
+                    // 1. Update preview_state (for quick-view pane)
+                    if let PreviewState::Loading { ref path, width, height } = self.preview_state {
+                        if path == &res.path && width == res.width && height == res.height {
+                            self.preview_state = PreviewState::Ready {
+                                path: res.path.clone(),
+                                width: res.width,
+                                height: res.height,
+                                content: text.clone(),
+                            };
+                            got_any = true;
+                        }
+                    }
+                    // 2. Update Dialog::ViewFile content (for split/fullscreen file viewer)
+                    if let Dialog::ViewFile { path, content, .. } = &mut self.dialog {
+                        if *path == res.path {
+                            *content = text;
+                            got_any = true;
+                        }
+                    }
                 }
-            }
-            // 2. Update Dialog::ViewFile content (for split/fullscreen file viewer)
-            if let Dialog::ViewFile { path, content, .. } = &mut self.dialog {
-                if *path == res.path {
-                    *content = res.content.clone();
-                    got_any = true;
+                PreviewContent::Image(dyn_img) => {
+                    if let PreviewState::Loading { ref path, width, height } = self.preview_state {
+                        if path == &res.path && width == res.width && height == res.height {
+                            let mut protocol_opt = None;
+                            if let Some(ref mut picker) = self.image_picker {
+                                protocol_opt = Some(picker.new_resize_protocol(dyn_img.clone()));
+                            }
+                            if protocol_opt.is_none() {
+                                let fallback = ratatui_image::picker::Picker::halfblocks();
+                                protocol_opt = Some(fallback.new_resize_protocol(dyn_img));
+                            }
+                            if let Some(protocol) = protocol_opt {
+                                self.preview_state = PreviewState::ReadyImage {
+                                    path: res.path.clone(),
+                                    width: res.width,
+                                    height: res.height,
+                                    protocol,
+                                };
+                                got_any = true;
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -840,6 +933,12 @@ impl App {
                 if p == &path && *w == cols && *h == rows =>
             {
                 "\n  Loading preview...".to_string()
+            }
+            PreviewState::ReadyImage { path: p, width: w, height: h, .. }
+                if p == &path && *w == cols && *h == rows =>
+            {
+                // Return an indicator that this is a natively rendered image preview
+                "\n  [ NATIVE IMAGE PREVIEW ]".to_string()
             }
             _ => {
                 // Either no preview or preview for a different file/size.
@@ -867,54 +966,51 @@ impl App {
         }
     }
 
-async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> String {
+async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> PreviewContent {
     if path.is_dir() {
         let path_clone = path.to_path_buf();
-        return tokio::task::spawn_blocking(move || {
+        let text = tokio::task::spawn_blocking(move || {
             read_dir_preview(&path_clone)
         }).await.unwrap_or_else(|_| "Error loading directory preview".to_string());
+        return PreviewContent::Text(text);
     }
     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
     
-    // 1. Image previews via chafa
+    // 1. Image previews via ratatui-image (native)
     if ["png", "jpg", "jpeg", "gif", "webp", "bmp"].contains(&ext.as_str()) {
-        let mut cmd = tokio::process::Command::new("chafa");
-        cmd.arg(format!("--size={}x{}", cols, rows)).arg(path);
-        if let Ok(out) = cmd.output().await {
-            if out.status.success() {
-                return String::from_utf8_lossy(&out.stdout).into_owned();
+        let path_clone = path.to_path_buf();
+        if let Ok(img) = tokio::task::spawn_blocking(move || {
+            image::open(&path_clone)
+        }).await {
+            if let Ok(dyn_img) = img {
+                return PreviewContent::Image(dyn_img);
             }
         }
-        return format!(
-            "\n  [ Image Preview ]\n  File: {}\n\n  Tip: Install 'chafa' (e.g. 'brew install chafa')\n  for beautiful inline terminal image previews!",
-            path.file_name().unwrap_or_default().to_string_lossy()
-        );
     }
 
-    // 2. Code previews via bat
+    // 2. Code previews via syntect (native)
     let is_text = ["rs", "py", "js", "ts", "json", "toml", "md", "sh", "txt", "cfg", "ini", "yaml", "yml", "xml", "html", "css", "c", "cpp", "h", "go", "java"].contains(&ext.as_str());
     if is_text {
-        let mut cmd = tokio::process::Command::new("bat");
-        cmd.arg("--color=always")
-           .arg("--style=plain")
-           .arg(format!("--terminal-width={}", cols))
-           .arg(path);
-        if let Ok(out) = cmd.output().await {
-            if out.status.success() {
-                let raw_str = String::from_utf8_lossy(&out.stdout);
-                let lines: Vec<&str> = raw_str.lines().take(rows as usize).collect();
-                return lines.join("\n");
+        let path_clone = path.to_path_buf();
+        let max_lines = rows.saturating_mul(5).max(500);
+        if let Ok(highlighted) = tokio::task::spawn_blocking(move || {
+            highlight_file(&path_clone, cols, max_lines)
+        }).await {
+            if let Some(content) = highlighted {
+                return PreviewContent::Text(content);
             }
         }
     }
 
     // 3. Fallback to standard text / hex preview (blocking thread pool spawn)
     let path_clone = path.to_path_buf();
-    tokio::task::spawn_blocking(move || {
+    let text = tokio::task::spawn_blocking(move || {
         read_file_preview(&path_clone)
     })
     .await
-    .unwrap_or_else(|_| "Error generating preview".to_string())
+    .unwrap_or_else(|_| "Error generating preview".to_string());
+    
+    PreviewContent::Text(text)
 }
 
     // =========================================================================

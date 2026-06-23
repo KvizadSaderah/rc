@@ -109,6 +109,44 @@ Mouse works everywhere, while the keyboard stays first-class:
 
 ---
 
+## 🐚 Shell Integration (Auto-cd on Exit)
+
+To make `rc` automatically change your terminal's working directory (`cd`) to the last visited folder upon exit, add the following wrapper function to your shell configuration:
+
+### Bash / Zsh
+Add this to your `~/.bashrc` or `~/.zshrc`:
+```bash
+function rc() {
+    local tmp="$(mktemp -t rc-cwd.XXXXXX)"
+    command rc --write-last-dir="$tmp" "$@"
+    if [ -f "$tmp" ]; then
+        local dir="$(cat "$tmp")"
+        rm -f "$tmp"
+        if [ -d "$dir" ] && [ "$dir" != "$(pwd)" ]; then
+            cd "$dir"
+        fi
+    fi
+}
+```
+
+### Fish
+Add this to `~/.config/fish/functions/rc.fish`:
+```fish
+function rc
+    set tmp (mktemp -t rc-cwd.XXXXXX)
+    command rc --write-last-dir=$tmp $argv
+    if test -f "$tmp"
+        set cl_dir (cat $tmp)
+        rm -f $tmp
+        if test -d "$cl_dir"; and test "$cl_dir" != (pwd)
+            cd $cl_dir
+        end
+    end
+end
+```
+
+---
+
 ## ⚙️ Configuration File (`config.ini`)
 
 Settings are loaded automatically at startup and saved to:

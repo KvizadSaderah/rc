@@ -351,7 +351,6 @@ impl InputField {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PreviewState {
     None,
     Loading {
@@ -365,14 +364,24 @@ pub enum PreviewState {
         height: u16,
         content: String,
     },
+    ReadyImage {
+        path: PathBuf,
+        width: u16,
+        height: u16,
+        protocol: ratatui_image::protocol::StatefulProtocol,
+    },
 }
 
-#[derive(Clone, Debug)]
+pub enum PreviewContent {
+    Text(String),
+    Image(image::DynamicImage),
+}
+
 pub struct PreviewResult {
     pub path: PathBuf,
     pub width: u16,
     pub height: u16,
-    pub content: String,
+    pub content: PreviewContent,
 }
 
 pub enum Dialog {

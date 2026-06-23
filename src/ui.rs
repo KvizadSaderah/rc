@@ -1363,13 +1363,25 @@ fn draw_live_preview(f: &mut Frame, area: Rect, selected: Option<FileItem>, app:
         .border_style(Style::default().fg(theme.inactive_border))
         .bg(theme.status_bg);
 
-    let content_lines = if let Some(item) = selected {
+    if let Some(item) = selected {
         let title_span = Span::styled(
             format!(" Live Preview: {} ", item.name),
             Style::default().fg(Color::Rgb(14, 116, 144)).bold(),
         );
         let active_block = block.title(title_span);
-        
+
+        // Check if we have a ready image preview
+        if let PreviewState::ReadyImage { path, protocol, .. } = &mut app.preview_state {
+            if path == &item.path {
+                let inner_area = active_block.inner(area);
+                f.render_widget(active_block, area);
+
+                let stateful_image = ratatui_image::StatefulImage::default().resize(ratatui_image::Resize::Fit(None));
+                f.render_stateful_widget(stateful_image, inner_area, protocol);
+                return;
+            }
+        }
+
         let body = if item.name == ".." {
             "↩ Go up to parent folder".to_string()
         } else if item.is_dir {
@@ -1378,26 +1390,33 @@ fn draw_live_preview(f: &mut Frame, area: Rect, selected: Option<FileItem>, app:
             app.get_preview_content(item.path, area.width.saturating_sub(2), area.height.saturating_sub(2))
         };
 
-        (active_block, parse_ansi_text(&body))
+        let content_lines = parse_ansi_text(&body);
+        let display_height = area.height.saturating_sub(2) as usize;
+        let total_lines = content_lines.len();
+        let max_offset = total_lines.saturating_sub(display_height);
+        if app.preview_scroll_offset > max_offset {
+            app.preview_scroll_offset = max_offset;
+        }
+
+        let lines: Vec<Line> = content_lines
+            .into_iter()
+            .skip(app.preview_scroll_offset)
+            .take(display_height)
+            .collect();
+
+        let para = Paragraph::new(lines).block(active_block).wrap(Wrap { trim: false });
+        f.render_widget(para, area);
     } else {
-        (block.title(" Live Preview "), parse_ansi_text("No item selected"))
-    };
-
-    let display_height = area.height.saturating_sub(2) as usize;
-    let total_lines = content_lines.1.len();
-    let max_offset = total_lines.saturating_sub(display_height);
-    if app.preview_scroll_offset > max_offset {
-        app.preview_scroll_offset = max_offset;
+        let active_block = block.title(" Live Preview ");
+        let content_lines = parse_ansi_text("No item selected");
+        let display_height = area.height.saturating_sub(2) as usize;
+        let lines: Vec<Line> = content_lines
+            .into_iter()
+            .take(display_height)
+            .collect();
+        let para = Paragraph::new(lines).block(active_block).wrap(Wrap { trim: false });
+        f.render_widget(para, area);
     }
-
-    let lines: Vec<Line> = content_lines.1
-        .into_iter()
-        .skip(app.preview_scroll_offset)
-        .take(display_height)
-        .collect();
-
-    let para = Paragraph::new(lines).block(content_lines.0).wrap(Wrap { trim: false });
-    f.render_widget(para, area);
 }
 
 /// How a pane is rendered relative to the current copy/move operation.

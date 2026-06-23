@@ -1074,6 +1074,10 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
 
         if app.should_quit {
             app.kill_running_process();
+            if let Some(ref path) = app.write_last_dir {
+                let active_dir = app.get_active_panel().path.clone();
+                let _ = std::fs::write(path, active_dir.to_string_lossy().as_bytes());
+            }
             break;
         }
     }
