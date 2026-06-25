@@ -23,6 +23,25 @@ pub struct Panel {
     pub last_git_query: Option<std::time::Instant>,
 }
 
+fn fuzzy_match(text: &str, query: &str) -> bool {
+    let query_chars: Vec<char> = query.to_lowercase().chars().collect();
+    if query_chars.is_empty() {
+        return true;
+    }
+    let text_chars: Vec<char> = text.to_lowercase().chars().collect();
+
+    let mut q_idx = 0;
+    for &c in &text_chars {
+        if c == query_chars[q_idx] {
+            q_idx += 1;
+            if q_idx == query_chars.len() {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 impl Panel {
     pub fn new(path: PathBuf, show_hidden: bool, sort_by: String) -> Self {
         let canonical_path = path.canonicalize().unwrap_or(path);
@@ -58,7 +77,7 @@ impl Panel {
                     return false;
                 }
                 if let Some(ref f) = self.filter
-                    && !item.name.to_lowercase().contains(&f.to_lowercase()) {
+                    && !fuzzy_match(&item.name, f) {
                         return false;
                     }
                 true
@@ -310,6 +329,30 @@ mod tests {
         assert!(p.items.iter().any(|i| i.name == "c.txt"));
         assert!(!p.items.iter().any(|i| i.name == "d.txt"));
         let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_fuzzy_filter() {
+        let (root, mut p) = fixture("fuzzy_filter");
+        p.filter = Some("cx".to_string());
+        p.refresh();
+        assert!(p.items.iter().any(|i| i.name == "c.txt"));
+        assert!(!p.items.iter().any(|i| i.name == "d.txt"));
+        
+        p.filter = Some("ad".to_string());
+        p.refresh();
+        assert!(p.items.iter().any(|i| i.name == "adir"));
+        assert!(!p.items.iter().any(|i| i.name == "c.txt"));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_fuzzy_match_unit() {
+        assert!(fuzzy_match("Cargo.toml", "ct"));
+        assert!(fuzzy_match("ui.rs", "urs"));
+        assert!(fuzzy_match("main.rs", "mr"));
+        assert!(!fuzzy_match("main.rs", "rm"));
+        assert!(fuzzy_match("main.rs", ""));
     }
 
     #[test]

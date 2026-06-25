@@ -60,7 +60,7 @@ The navigation controls dynamically adapt depending on whether you are using **S
 | **=** | **=** | Sync the inactive panel to the active panel's directory |
 | **Ctrl + Y** | **Ctrl + Y** | Copy the active panel path to the clipboard |
 | **:** | **:** | Open **Command Line prompt** to execute shell commands, `cd`, or quit (`q`, `exit`) |
-| **/** | **/** | Open **Interactive Filter prompt** to filter active list in real-time |
+| **/** | **/** | Open **Interactive Filter prompt** (uses fuzzy matching to filter active list in real-time) |
 | **~** | **~** | Jump directly to your Home (`~`) folder |
 | **R** | **R** | Refresh both panels |
 | **Esc / q / F10** | **Esc / q** | Close popups / Exit the application |
@@ -77,6 +77,8 @@ The navigation controls dynamically adapt depending on whether you are using **S
 - **F7 / n**: Create a new directory
 - **F8 / d**: Delete selected/tagged item(s) (recursive) with confirmation
 - **F9**: Open Interactive Dropdown Menu Bar (Left, File, Command, Options, Right)
+- **Alt + C**: Compress selected/tagged item(s) to a `.zip` or `.tar.gz` archive
+- **Alt + X**: Extract selected archive file (.zip/.tar/.tar.gz) to the opposite panel
 
 > **Background operations:** Copy, Move and Delete run on a background thread
 > with a live progress bar (current item, byte/file counts, percentage). The UI
@@ -163,6 +165,23 @@ Settings are loaded automatically at startup and saved to:
 
 Press **Ctrl+S** (or **o** in Vim mode) to open the interactive settings dialog. Use **Up/Down** to navigate rows, **Space** to toggle settings, and **Enter** to save changes to disk.
 
+### 🛠️ Custom User Actions (`[custom_actions]`)
+You can map custom key combinations to run arbitrary shell commands. Define them under the `[custom_actions]` section in your `config.ini` file:
+
+```ini
+[custom_actions]
+ctrl+r = cargo run
+ctrl+x = chmod +x %f
+alt+w = code %f
+```
+
+#### Available Macros:
+*   `%f`: Absolute path to the currently highlighted file.
+*   `%d`: Absolute path to the active panel directory.
+*   `%n`: Filename of the currently highlighted file.
+*   `%m`: Space-separated list of absolute paths of all marked (tagged) files.
+
+
 ---
 
 ## 🔍 External CLI Tools Integration
@@ -181,6 +200,9 @@ Press **Ctrl+S** (or **o** in Vim mode) to open the interactive settings dialog.
 ## 🎨 Native Previews & Rendering
 
 *   **Syntax Highlighting**: Code and config files are natively highlighted inside the preview window using `syntect` with a pure-Rust background parser (compiled using `regex-fancy` for build compatibility). Highlighting states are lazy-loaded to ensure zero application startup latency.
+*   **Git Diff Preview**: If a file is modified (staged or unstaged) in a Git workspace, `rc` will automatically show a gorgeous, colorized `git diff` inside the preview pane.
+*   **Archive Listings**: For `.zip`, `.tar.gz`, `.tgz`, and `.xz` files, the preview window will display a tree/list of files contained in the archive without needing to extract it first.
+*   **Markdown Rendering**: Markdown files (`.md`) are automatically rendered with terminal-safe ANSI escape sequences—highlighting titles, bolding headers, colorizing bullets, and text formatting.
 *   **Pixel-Perfect Image Preview**: Renders PNG, JPG, GIF, WebP, and other formats directly inside the terminal preview panel using `ratatui-image`. Automatically uses the best available protocol for your terminal (Kitty Graphics Protocol, Sixel, or half-blocks fallback).
 *   **Virtual Scroll Rendering**: Snappy performance even in directories with 10k+ files. `rc` uses viewport-based list virtualization so only visible files are formatted, styled, canonicalized, or checked for Git statuses.
 *   **Debounced File Watcher**: A built-in filesystem event watcher debounces multiple updates in quick succession, preventing rendering floods during batch operations.

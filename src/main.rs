@@ -56,8 +56,10 @@ fn print_help() {
          \x1b[36m  F9\x1b[0m  Menu    \x1b[36mTab\x1b[0m Switch  \x1b[36mSpace\x1b[0m Tag   \x1b[36mCtrl+A\x1b[0m All\n\
          \x1b[36m  Ctrl+S\x1b[0m  Settings    \x1b[36mCtrl+O\x1b[0m  Shell    \x1b[36mCtrl+B\x1b[0m  Bookmarks\n\
          \x1b[36m  Ctrl+T\x1b[0m  Tree view   \x1b[36mCtrl+P\x1b[0m  Preview  \x1b[36mCtrl+D\x1b[0m  Bookmark dir\n\
-         \x1b[36m  Ctrl+U\x1b[0m  Swap panels \x1b[36m=\x1b[0m       Sync     \x1b[36m~\x1b[0m       Home\n\
+         \x1b[36m  Ctrl+U\x1b[0m  Swap panels \x1b[36m=\x1b[0m       Sync     \x1b[36m~\x1b[0m       Home     \x1b[36m/\x1b[0m Fuzzy filter\n\
          \x1b[36m  Ctrl+Y\x1b[0m  Copy current panel path to clipboard\n\
+         \x1b[36m  Alt+C\x1b[0m   Compress selected/tagged files\n\
+         \x1b[36m  Alt+X\x1b[0m   Extract archive to partner pane\n\
          \n\
          \x1b[1mPANES (tiling):\x1b[0m\n\
          \x1b[36m  |\x1b[0m  Split left/right   \x1b[36m-\x1b[0m  Split top/bottom   \x1b[36mCtrl+W\x1b[0m  Close pane\n\
