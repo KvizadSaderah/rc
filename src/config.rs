@@ -5,6 +5,13 @@ use std::path::PathBuf;
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct CustomAction {
+    pub key_str: String,
+    pub keys: Vec<(KeyCode, KeyModifiers)>,
+    pub command: String,
+}
+
 pub struct Config {
     pub show_hidden: bool,
     pub sort_by: String,       // "name", "size", "time"
@@ -19,6 +26,7 @@ pub struct Config {
     pub use_nerd_fonts: bool,
     pub split_editor: bool,
     pub image_preview_protocol: String, // "auto", "kitty", "iterm2", "sixel", "halfblocks", "none"
+    pub custom_actions: Vec<CustomAction>,
 }
 
 #[derive(Clone, Debug)]
@@ -108,38 +116,59 @@ pub fn load_config() -> Config {
         use_nerd_fonts: true,
         split_editor: false,
         image_preview_protocol: "auto".to_string(),
+        custom_actions: Vec::new(),
     };
 
     if let Some(path) = get_config_path() {
         if let Ok(content) = fs::read_to_string(&path) {
+            let mut custom_actions_section = false;
             for line in content.lines() {
                 let trimmed = line.trim();
                 if trimmed.starts_with(';') || trimmed.starts_with('#') || trimmed.is_empty() {
                     continue;
                 }
+                if trimmed == "[custom_actions]" {
+                    custom_actions_section = true;
+                    continue;
+                }
+                if trimmed.starts_with('[') {
+                    custom_actions_section = false;
+                    continue;
+                }
                 let parts: Vec<&str> = line.splitn(2, '=').map(|s| s.trim()).collect();
                 if parts.len() == 2 {
-                    match parts[0] {
-                        "show_hidden" => config.show_hidden = parts[1] == "true",
-                        "sort_by" => config.sort_by = parts[1].to_string(),
-                        "keybindings" => config.keybindings = parts[1].to_string(),
-                        "default_editor" => config.default_editor = parts[1].to_string(),
-                        "editor_mode" => config.editor_mode = parts[1].to_string(),
-                        "confirm_quit" => config.confirm_quit = parts[1] == "true",
-                        "theme" => config.theme = parts[1].to_string(),
-                        "border_type" => config.border_type = parts[1].to_string(),
-                        "use_trash" => config.use_trash = parts[1] == "true",
-                        "use_nerd_fonts" => config.use_nerd_fonts = parts[1] == "true",
-                        "split_editor" => config.split_editor = parts[1] == "true",
-                        "image_preview_protocol" => config.image_preview_protocol = parts[1].to_string(),
-                        "bookmarks" => {
-                            config.bookmarks = parts[1]
-                                .split(',')
-                                .map(|s| PathBuf::from(s.trim()))
-                                .filter(|p| !p.as_os_str().is_empty())
-                                .collect();
+                    if custom_actions_section {
+                        let parsed_keys = parse_keys(parts[0]);
+                        if !parsed_keys.is_empty() {
+                            config.custom_actions.push(CustomAction {
+                                key_str: parts[0].to_string(),
+                                keys: parsed_keys,
+                                command: parts[1].to_string(),
+                            });
                         }
-                        _ => {}
+                    } else {
+                        match parts[0] {
+                            "show_hidden" => config.show_hidden = parts[1] == "true",
+                            "sort_by" => config.sort_by = parts[1].to_string(),
+                            "keybindings" => config.keybindings = parts[1].to_string(),
+                            "default_editor" => config.default_editor = parts[1].to_string(),
+                            "editor_mode" => config.editor_mode = parts[1].to_string(),
+                            "confirm_quit" => config.confirm_quit = parts[1] == "true",
+                            "theme" => config.theme = parts[1].to_string(),
+                            "border_type" => config.border_type = parts[1].to_string(),
+                            "use_trash" => config.use_trash = parts[1] == "true",
+                            "use_nerd_fonts" => config.use_nerd_fonts = parts[1] == "true",
+                            "split_editor" => config.split_editor = parts[1] == "true",
+                            "image_preview_protocol" => config.image_preview_protocol = parts[1].to_string(),
+                            "bookmarks" => {
+                                config.bookmarks = parts[1]
+                                    .split(',')
+                                    .map(|s| PathBuf::from(s.trim()))
+                                    .filter(|p| !p.as_os_str().is_empty())
+                                    .collect();
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
@@ -159,7 +188,7 @@ pub fn save_config(config: &Config) -> io::Result<()> {
             .map(|p| p.to_string_lossy())
             .collect::<Vec<_>>()
             .join(",");
-        let content = format!(
+        let mut content = format!(
             "; Rust Commander Configuration File\n\n\
              show_hidden = {}\n\
              sort_by = {}\n\
@@ -188,6 +217,17 @@ pub fn save_config(config: &Config) -> io::Result<()> {
              ; select_item = space\n",
             config.show_hidden, config.sort_by, config.keybindings, config.default_editor, config.editor_mode, config.confirm_quit, config.theme, config.border_type, config.use_trash, config.use_nerd_fonts, config.split_editor, config.image_preview_protocol, bookmarks_str
         );
+        if !config.custom_actions.is_empty() {
+            content.push_str("\n[custom_actions]\n\
+                             ; Map custom keybindings to terminal commands.\n\
+                             ; Macros: %f (selected file path), %d (current directory), %n (selected name), %m (marked files)\n\
+                             ; Examples:\n\
+                             ; ctrl+x = chmod +x %f\n\
+                             ; ctrl+r = cargo run\n");
+            for action in &config.custom_actions {
+                content.push_str(&format!("{} = {}\n", action.key_str, action.command));
+            }
+        }
         fs::write(path, content)?;
     }
     Ok(())

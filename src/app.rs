@@ -1034,6 +1034,98 @@ fn forced_protocol_from_env() -> Option<ratatui_image::picker::ProtocolType> {
     iterm2_like.then_some(ratatui_image::picker::ProtocolType::Iterm2)
 }
 
+fn read_git_diff_preview(path: &Path) -> Option<String> {
+    if std::process::Command::new("git").arg("--version").output().is_err() {
+        return None;
+    }
+    let parent_dir = path.parent().unwrap_or_else(|| Path::new("."));
+    
+    // Unstaged diff
+    if let Ok(out) = std::process::Command::new("git")
+        .args(["diff", "--color=always", &path.to_string_lossy()])
+        .current_dir(parent_dir)
+        .output() {
+        if out.status.success() && !out.stdout.is_empty() {
+            return Some(String::from_utf8_lossy(&out.stdout).into_owned());
+        }
+    }
+    
+    // Staged diff
+    if let Ok(out) = std::process::Command::new("git")
+        .args(["diff", "--cached", "--color=always", &path.to_string_lossy()])
+        .current_dir(parent_dir)
+        .output() {
+        if out.status.success() && !out.stdout.is_empty() {
+            return Some(String::from_utf8_lossy(&out.stdout).into_owned());
+        }
+    }
+    None
+}
+
+fn read_archive_preview(path: &Path) -> Option<String> {
+    let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    if ext == "zip" {
+        if let Ok(out) = std::process::Command::new("unzip")
+            .args(["-l", &path.to_string_lossy()])
+            .output() {
+            if out.status.success() {
+                return Some(String::from_utf8_lossy(&out.stdout).into_owned());
+            }
+        }
+    } else if ["tar", "gz", "tgz", "xz"].contains(&ext.as_str()) {
+        if let Ok(out) = std::process::Command::new("tar")
+            .args(["-tf", &path.to_string_lossy()])
+            .output() {
+            if out.status.success() {
+                let stdout_str = String::from_utf8_lossy(&out.stdout);
+                let lines: Vec<&str> = stdout_str.lines().take(40).collect();
+                let mut preview = lines.join("\n");
+                if stdout_str.lines().count() > 40 {
+                    preview.push_str("\n  ... and more items ...");
+                }
+                return Some(preview);
+            }
+        }
+    }
+    None
+}
+
+fn format_markdown_preview(raw_text: &str) -> String {
+    let mut formatted = String::new();
+    for line in raw_text.lines() {
+        if line.starts_with("# ") {
+            formatted.push_str(&format!("\x1b[1;38;5;38m{}\x1b[0m\n", line));
+        } else if line.starts_with("## ") {
+            formatted.push_str(&format!("\x1b[1;36m{}\x1b[0m\n", line));
+        } else if line.starts_with("### ") {
+            formatted.push_str(&format!("\x1b[1;32m{}\x1b[0m\n", line));
+        } else if line.starts_with("> ") {
+            formatted.push_str(&format!("\x1b[3;90m{}\x1b[0m\n", line));
+        } else if line.starts_with("- ") || line.starts_with("* ") {
+            if line.len() > 2 {
+                formatted.push_str(&format!("\x1b[33m•\x1b[0m {}\n", &line[2..]));
+            } else {
+                formatted.push_str("\x1b[33m•\x1b[0m\n");
+            }
+        } else {
+            let parts = line.split('`');
+            let mut highlighted_line = String::new();
+            let mut is_code = false;
+            for part in parts {
+                if is_code {
+                    highlighted_line.push_str(&format!("\x1b[33m{}\x1b[0m", part));
+                } else {
+                    highlighted_line.push_str(part);
+                }
+                is_code = !is_code;
+            }
+            formatted.push_str(&highlighted_line);
+            formatted.push('\n');
+        }
+    }
+    formatted
+}
+
 async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> PreviewContent {
     if path.is_dir() {
         let path_clone = path.to_path_buf();
@@ -1042,8 +1134,27 @@ async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> PreviewCon
         }).await.unwrap_or_else(|_| "Error loading directory preview".to_string());
         return PreviewContent::Text(text);
     }
+
+    // Git Diff preview
+    let path_clone = path.to_path_buf();
+    if let Ok(Some(diff)) = tokio::task::spawn_blocking(move || {
+        Self::read_git_diff_preview(&path_clone)
+    }).await {
+        return PreviewContent::Text(diff);
+    }
+
     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
-    
+
+    // Archive Preview
+    if ["zip", "tar", "gz", "tgz", "xz"].contains(&ext.as_str()) {
+        let path_clone = path.to_path_buf();
+        if let Ok(Some(archive_list)) = tokio::task::spawn_blocking(move || {
+            Self::read_archive_preview(&path_clone)
+        }).await {
+            return PreviewContent::Text(archive_list);
+        }
+    }
+
     // 1. Image previews via ratatui-image (native)
     if ["png", "jpg", "jpeg", "gif", "webp", "bmp"].contains(&ext.as_str()) {
         let path_clone = path.to_path_buf();
@@ -1067,6 +1178,19 @@ async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> PreviewCon
     let is_text = ["rs", "py", "js", "ts", "json", "toml", "md", "sh", "txt", "cfg", "ini", "yaml", "yml", "xml", "html", "css", "c", "cpp", "h", "go", "java"].contains(&ext.as_str());
     if is_text {
         let path_clone = path.to_path_buf();
+        if ext == "md" {
+            let text = tokio::task::spawn_blocking(move || {
+                if let Ok(content) = fs::read_to_string(&path_clone) {
+                    Some(Self::format_markdown_preview(&content))
+                } else {
+                    None
+                }
+            }).await.unwrap_or(None);
+            if let Some(content) = text {
+                return PreviewContent::Text(content);
+            }
+        }
+        let path_clone = path.to_path_buf();
         let max_lines = rows.saturating_mul(5).max(500);
         if let Ok(highlighted) = tokio::task::spawn_blocking(move || {
             highlight_file(&path_clone, cols, max_lines)
@@ -1084,7 +1208,7 @@ async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> PreviewCon
     })
     .await
     .unwrap_or_else(|_| "Error generating preview".to_string());
-    
+
     PreviewContent::Text(text)
 }
 
@@ -1172,6 +1296,45 @@ async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> PreviewCon
                 };
             }
         }
+    }
+
+    pub fn expand_macro(&self, cmd: &str) -> String {
+        let panel = self.get_active_panel();
+        let active_dir = &panel.path;
+        let selected_item = panel.get_selected_item();
+        let marked_files: Vec<PathBuf> = panel.marked.iter().cloned().collect();
+        
+        let mut expanded = cmd.to_string();
+        
+        // Expand %d (active panel directory)
+        let dir_str = active_dir.to_string_lossy();
+        expanded = expanded.replace("%d", &format!("'{}'", dir_str));
+        
+        // Expand %f and %n
+        if let Some(item) = selected_item {
+            let f_str = item.path.to_string_lossy();
+            expanded = expanded.replace("%f", &format!("'{}'", f_str));
+            expanded = expanded.replace("%n", &format!("'{}'", item.name));
+        } else {
+            expanded = expanded.replace("%f", "");
+            expanded = expanded.replace("%n", "");
+        }
+        
+        // Expand %m
+        if !marked_files.is_empty() {
+            let list = marked_files.iter()
+                .map(|p| format!("'{}'", p.to_string_lossy()))
+                .collect::<Vec<_>>()
+                .join(" ");
+            expanded = expanded.replace("%m", &list);
+        } else if let Some(item) = selected_item {
+            let f_str = item.path.to_string_lossy();
+            expanded = expanded.replace("%m", &format!("'{}'", f_str));
+        } else {
+            expanded = expanded.replace("%m", "");
+        }
+        
+        expanded
     }
 
     pub fn execute_shell_command<B: ratatui::backend::Backend>(&mut self, terminal: &mut Terminal<B>, cmd: String) {
@@ -1328,6 +1491,86 @@ async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> PreviewCon
                 }
             }
         }
+    }
+
+    pub fn initiate_compress(&mut self) {
+        let panel = self.get_active_panel();
+        let mut items = Vec::new();
+        if !panel.marked.is_empty() {
+            items = panel.marked.iter().cloned().collect();
+        } else if let Some(item) = panel.get_selected_item() {
+            if item.name != ".." {
+                items.push(item.path.clone());
+            }
+        }
+        
+        if items.is_empty() {
+            self.status_message = "No files selected to compress".to_string();
+            return;
+        }
+        
+        self.dialog = Dialog::InputCompress {
+            input: InputField::new("archive.zip".to_string()),
+            paths: items,
+        };
+    }
+
+    pub fn execute_compress<B: ratatui::backend::Backend>(&mut self, terminal: &mut Terminal<B>, archive_name: String, paths: Vec<PathBuf>) {
+        if archive_name.trim().is_empty() {
+            self.status_message = "Cancelled: Empty archive name".to_string();
+            return;
+        }
+        let active_dir = self.get_active_panel().path.clone();
+        let rel_paths: Vec<String> = paths.iter()
+            .map(|p| {
+                if let Ok(rel) = p.strip_prefix(&active_dir) {
+                    format!("'{}'", rel.to_string_lossy())
+                } else {
+                    format!("'{}'", p.to_string_lossy())
+                }
+            })
+            .collect();
+            
+        let cmd = if archive_name.ends_with(".tar.gz") || archive_name.ends_with(".tgz") {
+            format!("tar -czf '{}' {}", archive_name, rel_paths.join(" "))
+        } else {
+            let real_name = if archive_name.ends_with(".zip") {
+                archive_name
+            } else {
+                format!("{}.zip", archive_name)
+            };
+            format!("zip -r '{}' {}", real_name, rel_paths.join(" "))
+        };
+        
+        self.execute_shell_command(terminal, cmd);
+    }
+
+    pub fn initiate_extract<B: ratatui::backend::Backend>(&mut self, terminal: &mut Terminal<B>) {
+        let panel = self.get_active_panel();
+        let selected = match panel.get_selected_item() {
+            Some(item) if !item.is_dir => item.path.clone(),
+            _ => {
+                self.status_message = "Select an archive file to extract".to_string();
+                return;
+            }
+        };
+        
+        let ext = selected.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+        if !["zip", "tar", "gz", "tgz", "xz"].contains(&ext.as_str()) {
+            self.status_message = "Selected file is not a supported archive".to_string();
+            return;
+        }
+        
+        let dest_dir = self.get_inactive_panel().path.clone();
+        
+        let cmd = if ext == "zip" {
+            format!("unzip '{}' -d '{}'", selected.to_string_lossy(), dest_dir.to_string_lossy())
+        } else {
+            format!("tar -xf '{}' -C '{}'", selected.to_string_lossy(), dest_dir.to_string_lossy())
+        };
+        
+        self.status_message = format!("Extracting to {}...", dest_dir.display());
+        self.execute_shell_command(terminal, cmd);
     }
 
     pub fn initiate_copy(&mut self) {
@@ -2000,5 +2243,43 @@ mod tests {
             std::env::remove_var("TMUX");
             std::env::remove_var("RC_TEST_MULTIPLEXER_BIN");
         }
+    }
+
+    #[test]
+    fn test_expand_macro() {
+        let (root, app) = app_in("macro");
+        let cmd = "echo %d %f %n";
+        let expanded = app.expand_macro(cmd);
+        let left_dir = root.join("left").canonicalize().unwrap();
+        assert!(expanded.contains(&format!("'{}'", left_dir.display())));
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_format_markdown_preview() {
+        let md = "# Header 1\n## Header 2\n- Item 1\n`code` text";
+        let formatted = App::format_markdown_preview(md);
+        assert!(formatted.contains("\x1b[1;38;5;38m# Header 1\x1b[0m"));
+        assert!(formatted.contains("\x1b[1;36m## Header 2\x1b[0m"));
+        assert!(formatted.contains("\x1b[33m•\x1b[0m Item 1"));
+        assert!(formatted.contains("\x1b[33mcode\x1b[0m text"));
+    }
+
+    #[test]
+    fn test_initiate_compress() {
+        let (root, mut app) = app_in("compress");
+        let left_file = root.join("left/file.txt");
+        fs::write(&left_file, "content").unwrap();
+        app.refresh_panels();
+        let canon = left_file.canonicalize().unwrap();
+        app.get_active_panel_mut().marked.insert(canon.clone());
+        app.initiate_compress();
+        if let Dialog::InputCompress { paths, .. } = &app.dialog {
+            assert_eq!(paths.len(), 1);
+            assert_eq!(paths[0], canon);
+        } else {
+            panic!("Expected Dialog::InputCompress");
+        }
+        let _ = fs::remove_dir_all(&root);
     }
 }

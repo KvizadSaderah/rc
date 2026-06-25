@@ -463,6 +463,10 @@ pub enum Dialog {
         scroll_col: usize,
         modified: bool,
     },
+    InputCompress {
+        input: InputField,
+        paths: Vec<PathBuf>,
+    },
 }
 
 pub fn get_icon(item: &FileItem, use_nerd_fonts: bool) -> &'static str {

@@ -451,6 +451,42 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 sub_chunks[1].y + 1,
             ));
         }
+        Dialog::InputCompress { input, .. } => {
+            let area = centered_rect_min(60, 20, 36, 5, f.area());
+            f.render_widget(Clear, area);
+            let border_type = get_border_type(&app.config.border_type);
+            let block = Block::default()
+                .title(" Compress Files ")
+                .borders(Borders::ALL)
+                .border_type(border_type)
+                .border_style(Style::default().fg(theme.active_border))
+                .bg(theme.status_bg);
+            
+            let label = Paragraph::new("Enter archive name (.zip or .tar.gz):").block(Block::default());
+            let input_text = Paragraph::new(input.text.as_str())
+                .style(Style::default().bg(theme.inactive_selection_bg).fg(theme.file_fg))
+                .block(Block::default().borders(Borders::ALL).border_style(Style::default().fg(theme.inactive_border)));
+
+            let sub_chunks = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(1),
+                    Constraint::Length(3),
+                    Constraint::Min(0),
+                ])
+                .margin(1)
+                .split(area);
+
+            f.render_widget(Clear, area);
+            f.render_widget(block, area);
+            f.render_widget(label, sub_chunks[0]);
+            f.render_widget(input_text, sub_chunks[1]);
+            
+            f.set_cursor_position(Position::new(
+                sub_chunks[1].x + 1 + input.visual_cursor_col(),
+                sub_chunks[1].y + 1,
+            ));
+        }
         Dialog::ConfirmCopy { source_path, input } => {
             let area = centered_rect_min(65, 20, 40, 6, f.area());
             f.render_widget(Clear, area);
@@ -799,7 +835,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                     head("Selection & Marking"),
                     row("Space",         "Tag/mark file for bulk operation"),
                     row(".",             "Toggle hidden files visibility"),
-                    row("/",             "Filter current directory by name"),
+                    row("/",             "Interactive fuzzy filter"),
                     row("Ctrl+A",        "Select all items in panel"),
                 ],
                 1 => vec![
@@ -811,6 +847,8 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                     row("F7 / n",        "Create new directory (mkdir)"),
                     row("Shift+F7",      "Create empty file (touch)"),
                     row("F8 / Delete",   "Delete selection (with confirm)"),
+                    row("Alt+C",         "Compress selected/tagged files"),
+                    row("Alt+X",         "Extract selected archive to partner ○"),
                     Line::from(""),
                     head("Viewing & Editing"),
                     row("F3 / v",        "Full-screen text/binary viewer"),

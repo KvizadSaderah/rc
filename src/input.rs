@@ -291,6 +291,26 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                     KeyCode::Right => input.move_right(),
                     _ => {}
                 },
+                Dialog::InputCompress { input, paths } => {
+                    let paths_clone = paths.clone();
+                    match key.code {
+                        KeyCode::Enter => {
+                            let text = input.text.clone();
+                            app.dialog = Dialog::None;
+                            app.execute_compress(terminal, text, paths_clone);
+                        }
+                        KeyCode::Esc => {
+                            app.dialog = Dialog::None;
+                            app.status_message = "Cancelled".to_string();
+                        }
+                        KeyCode::Char(c) => input.insert(c),
+                        KeyCode::Backspace => input.backspace(),
+                        KeyCode::Delete => input.delete(),
+                        KeyCode::Left => input.move_left(),
+                        KeyCode::Right => input.move_right(),
+                        _ => {}
+                    }
+                },
                 Dialog::Properties { .. } => match key.code {
                     KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') => {
                         app.dialog = Dialog::None;
@@ -1091,6 +1111,20 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
 fn handle_main_keys<B: ratatui::backend::Backend>(app: &mut App, key: KeyEvent, terminal: &mut Terminal<B>) {
     let prev_state = app.focus_snapshot();
 
+    // Check custom actions first
+    let mut custom_cmd = None;
+    for action in &app.config.custom_actions {
+        if crate::config::matches_key(&key, &action.keys) {
+            custom_cmd = Some(action.command.clone());
+            break;
+        }
+    }
+    if let Some(cmd) = custom_cmd {
+        let expanded = app.expand_macro(&cmd);
+        app.execute_shell_command(terminal, expanded);
+        return;
+    }
+
     let keys = &app.keymap;
 
     if (key.code == KeyCode::Up && (key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::ALT)))
@@ -1130,6 +1164,10 @@ fn handle_main_keys<B: ratatui::backend::Backend>(app: &mut App, key: KeyEvent, 
         } else {
             app.initiate_mkdir();
         }
+    } else if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::ALT) {
+        app.initiate_compress();
+    } else if key.code == KeyCode::Char('x') && key.modifiers.contains(KeyModifiers::ALT) {
+        app.initiate_extract(terminal);
     } else if matches_key(&key, &keys.delete) {
         app.initiate_delete();
     } else if key.code == KeyCode::F(2) || (key.code == KeyCode::Char('i') && key.modifiers.contains(KeyModifiers::CONTROL)) {
