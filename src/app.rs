@@ -561,15 +561,13 @@ impl App {
     }
 
     pub fn refresh_panels(&mut self) {
-        if self.tree_mode {
-            self.init_tree();
-            self.update_right_panel_from_tree();
-        } else {
-            for slot in self.panels.iter_mut() {
-                if let Some(p) = slot {
-                    p.refresh();
-                }
+        for slot in self.panels.iter_mut() {
+            if let Some(p) = slot {
+                p.refresh();
             }
+        }
+        if self.tree_mode {
+            self.update_right_panel_from_tree();
         }
     }
 
