@@ -1339,6 +1339,22 @@ fn truncate_middle(s: &str, max: usize) -> String {
     out
 }
 
+/// Fit a file name into `name_w` columns, char-safe (never slices mid-codepoint).
+/// `git_len` reserves room for the git badge that renders after the name.
+pub fn fit_name(raw_name: &str, git_len: usize, name_w: usize) -> String {
+    let raw_chars = raw_name.chars().count();
+    if raw_chars + git_len <= name_w {
+        return raw_name.to_string();
+    }
+    let max_raw = name_w.saturating_sub(git_len + 3);
+    if raw_chars > max_raw {
+        let truncated: String = raw_name.chars().take(max_raw).collect();
+        format!("{truncated}...")
+    } else {
+        raw_name.to_string()
+    }
+}
+
 // Drops down overlay block under the active top tab
 fn draw_menu_dropdown(f: &mut Frame, active_menu: usize, item_idx: usize, theme: &Theme) {
     let items = match active_menu {
@@ -1624,18 +1640,9 @@ fn draw_panel(f: &mut Frame, area: Rect, panel: &mut Panel, role: PaneRole, them
         // Reserve one column for the selection gutter on the left.
         let name_w = width.saturating_sub(time_w + size_w + 4) as usize;
 
-        let final_name_str = if raw_name.len() + git_str.len() > name_w {
-            let max_raw = name_w.saturating_sub(git_str.len() + 3);
-            if raw_name.len() > max_raw {
-                format!("{}...", &raw_name[..max_raw])
-            } else {
-                raw_name
-            }
-        } else {
-            raw_name
-        };
+        let final_name_str = fit_name(&raw_name, git_str.len(), name_w);
 
-        let padded_len = name_w.saturating_sub(final_name_str.len() + git_str.len());
+        let padded_len = name_w.saturating_sub(final_name_str.chars().count() + git_str.len());
         let padding = " ".repeat(padded_len);
 
         let git_span = match git_badge.map(|s| s.as_str()) {

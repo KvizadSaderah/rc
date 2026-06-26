@@ -1,15 +1,3 @@
-mod theme;
-mod config;
-mod types;
-mod panel;
-mod fileops;
-mod watcher;
-mod shell;
-mod layout;
-mod app;
-mod input;
-mod ui;
-
 use std::env;
 use std::fs;
 use std::io;
@@ -29,8 +17,8 @@ use ratatui::{
     Terminal,
 };
 
-use app::App;
-use input::run_app;
+use rust_commander::app::App;
+use rust_commander::input::run_app;
 
 // =============================================================================
 // CLI: --help, --version, update
