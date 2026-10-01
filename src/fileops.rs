@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
+use std::cell::Cell;
 use std::thread::{self, JoinHandle};
 
 const CHUNK: usize = 128 * 1024;
@@ -142,7 +143,7 @@ pub fn spawn(kind: OpKind, items: Vec<(PathBuf, PathBuf)>) -> JobState {
     let cancel_worker = Arc::clone(&cancel);
 
     let handle = thread::spawn(move || {
-        let ctx = Worker { tx, cancel: cancel_worker };
+        let ctx = Worker { tx, cancel: cancel_worker, errors: Cell::new(0) };
         ctx.run(kind, items);
     });
 
@@ -164,6 +165,8 @@ pub fn spawn(kind: OpKind, items: Vec<(PathBuf, PathBuf)>) -> JobState {
 struct Worker {
     tx: Sender<Msg>,
     cancel: Arc<AtomicBool>,
+    /// Number of `Msg::Error`s sent so far; lets callers detect partial failure.
+    errors: Cell<usize>,
 }
 
 impl Worker {
@@ -172,6 +175,9 @@ impl Worker {
     }
 
     fn send(&self, m: Msg) {
+        if matches!(m, Msg::Error(_)) {
+            self.errors.set(self.errors.get() + 1);
+        }
         let _ = self.tx.send(m);
     }
 
@@ -193,7 +199,7 @@ impl Worker {
             }
             let result = match kind {
                 OpKind::Delete => self.delete_tree(src),
-                OpKind::Copy => self.copy_tree(src, dst),
+                OpKind::Copy => check_copy_target(src, dst).and_then(|_| self.copy_tree(src, dst)),
                 OpKind::Move => self.move_one(src, dst),
                 OpKind::Trash => self.trash_one(src),
             };
@@ -283,16 +289,23 @@ impl Worker {
                 self.send(Msg::FileDone);
                 Ok(())
             }
-            Err(e) if is_cross_device(&e) => {
-                // Fall back to copy + delete with byte-level progress.
-                self.copy_tree(src, dst)?;
-                if self.cancelled() {
-                    return Err(cancelled());
-                }
-                self.delete_tree(src)
-            }
+            Err(e) if is_cross_device(&e) => self.copy_then_delete(src, dst),
             Err(e) => Err(e),
         }
+    }
+
+    /// Cross-device move. The source is removed only if every entry copied
+    /// cleanly; on any partial failure it is kept so nothing is lost.
+    fn copy_then_delete(&self, src: &Path, dst: &Path) -> io::Result<()> {
+        let errors_before = self.errors.get();
+        self.copy_tree(src, dst)?;
+        if self.cancelled() {
+            return Err(cancelled());
+        }
+        if self.errors.get() != errors_before {
+            return Err(io::Error::other("copy incomplete, source kept"));
+        }
+        self.delete_tree(src)
     }
 
     // ---- Trash -------------------------------------------------------------
@@ -346,6 +359,26 @@ impl Worker {
 }
 
 // ---- Helpers ---------------------------------------------------------------
+
+/// Reject copies that would destroy or endlessly recurse into the source:
+/// `dst` equal to `src` (File::create would truncate it) or inside it.
+fn check_copy_target(src: &Path, dst: &Path) -> io::Result<()> {
+    let src = fs::canonicalize(src)?;
+    // dst usually doesn't exist yet: resolve its parent and re-append the name.
+    let dst = match (dst.parent(), dst.file_name()) {
+        (Some(parent), Some(name)) => fs::canonicalize(parent)
+            .map(|p| p.join(name))
+            .unwrap_or_else(|_| dst.to_path_buf()),
+        _ => dst.to_path_buf(),
+    };
+    if dst == src {
+        Err(io::Error::other("source and destination are the same"))
+    } else if dst.starts_with(&src) {
+        Err(io::Error::other("cannot copy a directory into itself"))
+    } else {
+        Ok(())
+    }
+}
 
 /// Count files and bytes under `path` without following symlinks.
 fn scan(path: &Path) -> (u64, u64) {
@@ -513,6 +546,61 @@ mod tests {
         assert!(link_meta.file_type().is_symlink(), "loop link recreated, not followed");
         assert!(job.errors.is_empty());
 
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_copy_onto_self_keeps_source() {
+        let root = tmp("self");
+        fs::create_dir_all(&root).unwrap();
+        let f = root.join("a.txt");
+        fs::write(&f, b"precious").unwrap();
+
+        let job = drain(spawn(OpKind::Copy, vec![(f.clone(), f.clone())]));
+
+        assert_eq!(fs::read(&f).unwrap(), b"precious");
+        assert_eq!(job.errors.len(), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_copy_dir_into_itself_rejected() {
+        let root = tmp("into");
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("f.txt"), b"x").unwrap();
+
+        let job = drain(spawn(OpKind::Copy, vec![(src.clone(), src.join("src"))]));
+
+        assert!(!src.join("src").exists());
+        assert_eq!(job.errors.len(), 1);
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cross_device_move_keeps_source_on_partial_copy() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tmp("xdev");
+        let src = root.join("src");
+        fs::create_dir_all(&src).unwrap();
+        fs::write(src.join("ok.txt"), b"ok").unwrap();
+        let locked = src.join("locked.txt");
+        fs::write(&locked, b"secret").unwrap();
+        fs::set_permissions(&locked, fs::Permissions::from_mode(0o000)).unwrap();
+        if File::open(&locked).is_ok() {
+            // Running as root: permissions can't force a copy failure.
+            let _ = fs::set_permissions(&locked, fs::Permissions::from_mode(0o644));
+            let _ = fs::remove_dir_all(&root);
+            return;
+        }
+
+        let (tx, _rx) = mpsc::channel();
+        let w = Worker { tx, cancel: Arc::new(AtomicBool::new(false)), errors: Cell::new(0) };
+        assert!(w.copy_then_delete(&src, &root.join("dst")).is_err());
+        assert!(locked.exists(), "source must survive a partial copy");
+
+        let _ = fs::set_permissions(&locked, fs::Permissions::from_mode(0o644));
         let _ = fs::remove_dir_all(&root);
     }
 
