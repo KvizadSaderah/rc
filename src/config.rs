@@ -184,53 +184,77 @@ pub fn save_config(config: &Config) -> io::Result<()> {
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let bookmarks_str = config.bookmarks.iter()
-            .map(|p| p.to_string_lossy())
-            .collect::<Vec<_>>()
-            .join(",");
-        let mut content = format!(
-            "; Rust Commander Configuration File\n\n\
-             show_hidden = {}\n\
-             sort_by = {}\n\
-             keybindings = {}\n\
-             default_editor = {}\n\
-             editor_mode = {}\n\
-             confirm_quit = {}\n\
-             theme = {}\n\
-             border_type = {}\n\
-             use_trash = {}\n\
-             use_nerd_fonts = {}\n\
-             split_editor = {}\n\
-             image_preview_protocol = {}\n\
-             bookmarks = {}\n\n\
-             [keys]\n\
-             ; Customize shortcuts here. Format: command = key, modifiers+key\n\
-             ; Examples:\n\
-             ; quit = q, f10\n\
-             ; view = f3, v\n\
-             ; edit = f4, e\n\
-             ; copy = f5, c\n\
-             ; move = f6, m\n\
-             ; delete = f8, d\n\
-             ; toggle_hidden = .\n\
-             ; toggle_preview = ctrl+p\n\
-             ; select_item = space\n",
-            config.show_hidden, config.sort_by, config.keybindings, config.default_editor, config.editor_mode, config.confirm_quit, config.theme, config.border_type, config.use_trash, config.use_nerd_fonts, config.split_editor, config.image_preview_protocol, bookmarks_str
-        );
-        if !config.custom_actions.is_empty() {
-            content.push_str("\n[custom_actions]\n\
-                             ; Map custom keybindings to terminal commands.\n\
-                             ; Macros: %f (selected file path), %d (current directory), %n (selected name), %m (marked files)\n\
-                             ; Examples:\n\
-                             ; ctrl+x = chmod +x %f\n\
-                             ; ctrl+r = cargo run\n");
-            for action in &config.custom_actions {
-                content.push_str(&format!("{} = {}\n", action.key_str, action.command));
-            }
-        }
-        fs::write(path, content)?;
+        let existing = fs::read_to_string(&path).ok();
+        fs::write(path, render_config(config, existing.as_deref()))?;
     }
     Ok(())
+}
+
+/// The `[keys]` section is user-edited only; return it verbatim from `content`.
+fn keys_section(content: &str) -> Option<String> {
+    let mut lines = content.lines().skip_while(|l| l.trim() != "[keys]");
+    let header = lines.next()?;
+    let mut out = format!("{header}\n");
+    for line in lines.take_while(|l| !l.trim().starts_with('[')) {
+        out.push_str(line);
+        out.push('\n');
+    }
+    // Drop trailing blank lines so repeated saves don't accumulate them.
+    out.truncate(out.trim_end().len());
+    out.push('\n');
+    Some(out)
+}
+
+fn render_config(config: &Config, existing: Option<&str>) -> String {
+    let bookmarks_str = config.bookmarks.iter()
+        .map(|p| p.to_string_lossy())
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut content = format!(
+        "; Rust Commander Configuration File\n\n\
+         show_hidden = {}\n\
+         sort_by = {}\n\
+         keybindings = {}\n\
+         default_editor = {}\n\
+         editor_mode = {}\n\
+         confirm_quit = {}\n\
+         theme = {}\n\
+         border_type = {}\n\
+         use_trash = {}\n\
+         use_nerd_fonts = {}\n\
+         split_editor = {}\n\
+         image_preview_protocol = {}\n\
+         bookmarks = {}\n\n",
+        config.show_hidden, config.sort_by, config.keybindings, config.default_editor, config.editor_mode, config.confirm_quit, config.theme, config.border_type, config.use_trash, config.use_nerd_fonts, config.split_editor, config.image_preview_protocol, bookmarks_str
+    );
+    match existing.and_then(keys_section) {
+        Some(keys) => content.push_str(&keys),
+        None => content.push_str(
+        "[keys]\n\
+         ; Customize shortcuts here. Format: command = key, modifiers+key\n\
+         ; Examples:\n\
+         ; quit = q, f10\n\
+         ; view = f3, v\n\
+         ; edit = f4, e\n\
+         ; copy = f5, c\n\
+         ; move = f6, m\n\
+         ; delete = f8, d\n\
+         ; toggle_hidden = .\n\
+         ; toggle_preview = ctrl+p\n\
+         ; select_item = space\n"),
+    }
+    if !config.custom_actions.is_empty() {
+        content.push_str("\n[custom_actions]\n\
+                         ; Map custom keybindings to terminal commands.\n\
+                         ; Macros: %f (selected file path), %d (current directory), %n (selected name), %m (marked files)\n\
+                         ; Examples:\n\
+                         ; ctrl+x = chmod +x %f\n\
+                         ; ctrl+r = cargo run\n");
+        for action in &config.custom_actions {
+            content.push_str(&format!("{} = {}\n", action.key_str, action.command));
+        }
+    }
+    content
 }
 
 fn parse_keys(val: &str) -> Vec<(KeyCode, KeyModifiers)> {
@@ -332,9 +356,16 @@ pub fn load_keymap(config: &Config) -> Keymap {
     k
 }
 
+/// Modifiers must match exactly, so a plain `c` binding does not also fire on
+/// Alt+C or Ctrl+C. SHIFT is ignored for characters: it is already folded into
+/// the char itself ('?', 'N') and terminals disagree on reporting it.
 pub fn matches_key(event: &KeyEvent, keys: &[(KeyCode, KeyModifiers)]) -> bool {
+    let strip = |m: KeyModifiers| match event.code {
+        KeyCode::Char(_) | KeyCode::BackTab => m - KeyModifiers::SHIFT,
+        _ => m,
+    };
     keys.iter().any(|(code, mods)| {
-        event.code == *code && event.modifiers.contains(*mods)
+        event.code == *code && strip(event.modifiers) == strip(*mods)
     })
 }
 
@@ -386,4 +417,66 @@ pub fn command_exists(cmd_str: &str, current_dir: &std::path::Path) -> bool {
     }
     
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, mods)
+    }
+
+    #[test]
+    fn test_matches_key_exact_modifiers() {
+        let copy = [(KeyCode::Char('c'), KeyModifiers::empty())];
+        assert!(matches_key(&key(KeyCode::Char('c'), KeyModifiers::empty()), &copy));
+        assert!(!matches_key(&key(KeyCode::Char('c'), KeyModifiers::ALT), &copy));
+        assert!(!matches_key(&key(KeyCode::Char('c'), KeyModifiers::CONTROL), &copy));
+
+        let help = [(KeyCode::Char('?'), KeyModifiers::empty())];
+        assert!(matches_key(&key(KeyCode::Char('?'), KeyModifiers::SHIFT), &help));
+
+        let f7 = [(KeyCode::F(7), KeyModifiers::empty())];
+        assert!(!matches_key(&key(KeyCode::F(7), KeyModifiers::SHIFT), &f7));
+    }
+
+    #[test]
+    fn test_render_config_preserves_keys_section() {
+        let mut config = load_defaults_for_test();
+        config.bookmarks = vec![PathBuf::from("/tmp")];
+        let existing = "show_hidden = false\n\n[keys]\nquit = f10\ncopy = f5\n\n\n[custom_actions]\nctrl+x = ls\n";
+
+        let once = render_config(&config, Some(existing));
+        assert!(once.contains("[keys]\nquit = f10\ncopy = f5\n"));
+        assert!(once.contains("bookmarks = /tmp"));
+
+        let twice = render_config(&config, Some(&once));
+        assert_eq!(once, twice, "saving must be idempotent");
+    }
+
+    #[test]
+    fn test_render_config_template_without_existing() {
+        let out = render_config(&load_defaults_for_test(), None);
+        assert!(out.contains("[keys]\n; Customize shortcuts here."));
+    }
+
+    fn load_defaults_for_test() -> Config {
+        Config {
+            show_hidden: false,
+            sort_by: "name".to_string(),
+            keybindings: "standard".to_string(),
+            default_editor: "vi".to_string(),
+            editor_mode: "external".to_string(),
+            confirm_quit: true,
+            bookmarks: Vec::new(),
+            theme: "eve".to_string(),
+            border_type: "plain".to_string(),
+            use_trash: true,
+            use_nerd_fonts: true,
+            split_editor: false,
+            image_preview_protocol: "auto".to_string(),
+            custom_actions: Vec::new(),
+        }
+    }
 }

@@ -1158,12 +1158,10 @@ fn handle_main_keys<B: ratatui::backend::Backend>(app: &mut App, key: KeyEvent, 
         app.initiate_copy();
     } else if matches_key(&key, &keys.move_item) {
         app.initiate_move();
+    } else if key.code == KeyCode::F(7) && key.modifiers.contains(KeyModifiers::SHIFT) {
+        app.initiate_touch();
     } else if matches_key(&key, &keys.mkdir) {
-        if key.modifiers.contains(KeyModifiers::SHIFT) || key.modifiers.contains(KeyModifiers::CONTROL) {
-            app.initiate_touch();
-        } else {
-            app.initiate_mkdir();
-        }
+        app.initiate_mkdir();
     } else if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::ALT) {
         app.initiate_compress();
     } else if key.code == KeyCode::Char('x') && key.modifiers.contains(KeyModifiers::ALT) {
