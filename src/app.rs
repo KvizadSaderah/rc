@@ -75,11 +75,11 @@ static SYNTAX_SET: OnceLock<SyntaxSet> = OnceLock::new();
 static THEME_SET: OnceLock<ThemeSet> = OnceLock::new();
 
 fn get_syntax_set() -> &'static SyntaxSet {
-    SYNTAX_SET.get_or_init(|| SyntaxSet::load_defaults_newlines())
+    SYNTAX_SET.get_or_init(SyntaxSet::load_defaults_newlines)
 }
 
 fn get_theme_set() -> &'static ThemeSet {
-    THEME_SET.get_or_init(|| ThemeSet::load_defaults())
+    THEME_SET.get_or_init(ThemeSet::load_defaults)
 }
 
 fn highlight_file(path: &Path, _cols: u16, max_lines: u16) -> Option<String> {
@@ -103,23 +103,22 @@ fn highlight_file(path: &Path, _cols: u16, max_lines: u16) -> Option<String> {
 
     let mut h = HighlightLines::new(syntax, theme);
     let mut output = String::new();
-    let mut line_count = 0;
-
-    for line in LinesWithEndings::from(&content) {
-        if line_count >= max_lines {
-            break;
-        }
+    for line in LinesWithEndings::from(&content).take(max_lines as usize) {
         let ranges = h.highlight_line(line, ps).ok()?;
         let escaped = as_24_bit_terminal_escaped(&ranges, true);
         output.push_str(&escaped);
-        line_count += 1;
     }
 
     Some(output)
 }
 
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl App {
-    #[allow(dead_code)]
     pub fn new() -> Self {
         Self::new_with_options(None, None)
     }
@@ -267,11 +266,9 @@ impl App {
 
     pub fn apply_config(&mut self) {
         let (show_hidden, sort_by) = (self.config.show_hidden, self.config.sort_by.clone());
-        for slot in self.panels.iter_mut() {
-            if let Some(p) = slot {
-                p.show_hidden = show_hidden;
-                p.sort_by = sort_by.clone();
-            }
+        for p in self.panels.iter_mut().flatten() {
+            p.show_hidden = show_hidden;
+            p.sort_by = sort_by.clone();
         }
 
         self.keymap = load_keymap(&self.config);
@@ -313,10 +310,8 @@ impl App {
 
     /// Reset the git-status cache on every pane (forces a re-query on refresh).
     pub fn reset_git_query_all(&mut self) {
-        for slot in self.panels.iter_mut() {
-            if let Some(p) = slot {
-                p.last_git_query = None;
-            }
+        for p in self.panels.iter_mut().flatten() {
+            p.last_git_query = None;
         }
     }
 
@@ -552,20 +547,17 @@ impl App {
     /// Grow or shrink the focused pane along `dir` by adjusting its nearest
     /// ancestor split of that orientation.
     pub fn resize_focus(&mut self, grow: bool, dir: Dir) {
-        if let Some((path, in_first)) = self.root.ancestor_split(self.focus, dir) {
-            if let Some(cur) = self.root.get_ratio(&path) {
+        if let Some((path, in_first)) = self.root.ancestor_split(self.focus, dir)
+            && let Some(cur) = self.root.get_ratio(&path) {
                 let step = 0.05;
                 let delta = if grow == in_first { step } else { -step };
                 self.root.set_ratio(&path, cur + delta);
             }
-        }
     }
 
     pub fn refresh_panels(&mut self) {
-        for slot in self.panels.iter_mut() {
-            if let Some(p) = slot {
-                p.refresh();
-            }
+        for p in self.panels.iter_mut().flatten() {
+            p.refresh();
         }
         if self.tree_mode {
             self.update_right_panel_from_tree();
@@ -917,8 +909,8 @@ impl App {
             match res.content {
                 PreviewContent::Text(text) => {
                     // 1. Update preview_state (for quick-view pane)
-                    if let PreviewState::Loading { ref path, width, height } = self.preview_state {
-                        if path == &res.path && width == res.width && height == res.height {
+                    if let PreviewState::Loading { ref path, width, height } = self.preview_state
+                        && path == &res.path && width == res.width && height == res.height {
                             self.preview_state = PreviewState::Ready {
                                 path: res.path.clone(),
                                 width: res.width,
@@ -927,18 +919,16 @@ impl App {
                             };
                             got_any = true;
                         }
-                    }
                     // 2. Update Dialog::ViewFile content (for split/fullscreen file viewer)
-                    if let Dialog::ViewFile { path, content, .. } = &mut self.dialog {
-                        if *path == res.path {
+                    if let Dialog::ViewFile { path, content, .. } = &mut self.dialog
+                        && *path == res.path {
                             *content = text;
                             got_any = true;
                         }
-                    }
                 }
                 PreviewContent::Image(dyn_img) => {
-                    if let PreviewState::Loading { ref path, .. } = self.preview_state {
-                        if path == &res.path {
+                    if let PreviewState::Loading { ref path, .. } = self.preview_state
+                        && path == &res.path {
                             let mut protocol_opt = None;
                             if let Some(ref mut picker) = self.image_picker {
                                 protocol_opt = Some(picker.new_resize_protocol(dyn_img.clone()));
@@ -957,9 +947,8 @@ impl App {
                                 got_any = true;
                             }
                         }
-                    }
-                    if let Dialog::ViewFile { ref path, .. } = self.dialog {
-                        if path == &res.path {
+                    if let Dialog::ViewFile { ref path, .. } = self.dialog
+                        && path == &res.path {
                             let mut protocol_opt = None;
                             if let Some(ref mut picker) = self.image_picker {
                                 protocol_opt = Some(picker.new_resize_protocol(dyn_img.clone()));
@@ -973,7 +962,6 @@ impl App {
                                 got_any = true;
                             }
                         }
-                    }
                 }
             }
         }
@@ -1043,21 +1031,19 @@ fn read_git_diff_preview(path: &Path) -> Option<String> {
     if let Ok(out) = std::process::Command::new("git")
         .args(["diff", "--color=always", &path.to_string_lossy()])
         .current_dir(parent_dir)
-        .output() {
-        if out.status.success() && !out.stdout.is_empty() {
+        .output()
+        && out.status.success() && !out.stdout.is_empty() {
             return Some(String::from_utf8_lossy(&out.stdout).into_owned());
         }
-    }
     
     // Staged diff
     if let Ok(out) = std::process::Command::new("git")
         .args(["diff", "--cached", "--color=always", &path.to_string_lossy()])
         .current_dir(parent_dir)
-        .output() {
-        if out.status.success() && !out.stdout.is_empty() {
+        .output()
+        && out.status.success() && !out.stdout.is_empty() {
             return Some(String::from_utf8_lossy(&out.stdout).into_owned());
         }
-    }
     None
 }
 
@@ -1066,16 +1052,15 @@ fn read_archive_preview(path: &Path) -> Option<String> {
     if ext == "zip" {
         if let Ok(out) = std::process::Command::new("unzip")
             .args(["-l", &path.to_string_lossy()])
-            .output() {
-            if out.status.success() {
+            .output()
+            && out.status.success() {
                 return Some(String::from_utf8_lossy(&out.stdout).into_owned());
             }
-        }
-    } else if ["tar", "gz", "tgz", "xz"].contains(&ext.as_str()) {
-        if let Ok(out) = std::process::Command::new("tar")
+    } else if ["tar", "gz", "tgz", "xz"].contains(&ext.as_str())
+        && let Ok(out) = std::process::Command::new("tar")
             .args(["-tf", &path.to_string_lossy()])
-            .output() {
-            if out.status.success() {
+            .output()
+            && out.status.success() {
                 let stdout_str = String::from_utf8_lossy(&out.stdout);
                 let lines: Vec<&str> = stdout_str.lines().take(40).collect();
                 let mut preview = lines.join("\n");
@@ -1084,8 +1069,6 @@ fn read_archive_preview(path: &Path) -> Option<String> {
                 }
                 return Some(preview);
             }
-        }
-    }
     None
 }
 
@@ -1166,11 +1149,10 @@ async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> PreviewCon
             } else {
                 None
             }
-        }).await {
-            if let Some(dyn_img) = img {
+        }).await
+            && let Some(dyn_img) = img {
                 return PreviewContent::Image(dyn_img);
             }
-        }
     }
 
     // 2. Code previews via syntect (native)
@@ -1193,11 +1175,10 @@ async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> PreviewCon
         let max_lines = rows.saturating_mul(5).max(500);
         if let Ok(highlighted) = tokio::task::spawn_blocking(move || {
             highlight_file(&path_clone, cols, max_lines)
-        }).await {
-            if let Some(content) = highlighted {
+        }).await
+            && let Some(content) = highlighted {
                 return PreviewContent::Text(content);
             }
-        }
     }
 
     // 3. Fallback to standard text / hex preview (blocking thread pool spawn)
@@ -1497,11 +1478,10 @@ async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> PreviewCon
         let mut items = Vec::new();
         if !panel.marked.is_empty() {
             items = panel.marked.iter().cloned().collect();
-        } else if let Some(item) = panel.get_selected_item() {
-            if item.name != ".." {
+        } else if let Some(item) = panel.get_selected_item()
+            && item.name != ".." {
                 items.push(item.path.clone());
             }
-        }
         
         if items.is_empty() {
             self.status_message = "No files selected to compress".to_string();

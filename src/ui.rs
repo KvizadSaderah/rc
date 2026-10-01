@@ -620,15 +620,14 @@ pub fn ui(f: &mut Frame, app: &mut App) {
             let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
             let is_image = ["png", "jpg", "jpeg", "gif", "webp", "bmp"].contains(&ext.as_str());
 
-            if is_image {
-                if let Some(protocol) = &mut app.viewer_image_protocol {
+            if is_image
+                && let Some(protocol) = &mut app.viewer_image_protocol {
                     let inner_area = block.inner(area);
                     f.render_widget(block, area);
                     let stateful_image = ratatui_image::StatefulImage::default().resize(ratatui_image::Resize::Fit(None));
                     f.render_stateful_widget(stateful_image, inner_area, protocol);
                     return;
                 }
-            }
 
             let parsed_lines = parse_ansi_text(content);
             let visible_lines = area.height.saturating_sub(2) as usize;
@@ -1469,8 +1468,8 @@ fn draw_live_preview(f: &mut Frame, area: Rect, selected: Option<FileItem>, app:
         let active_block = block.title(title_span);
 
         // Check if we have a ready image preview
-        if let PreviewState::ReadyImage { path, protocol, .. } = &mut app.preview_state {
-            if path == &item.path {
+        if let PreviewState::ReadyImage { path, protocol, .. } = &mut app.preview_state
+            && path == &item.path {
                 let inner_area = active_block.inner(area);
                 f.render_widget(active_block, area);
 
@@ -1478,7 +1477,6 @@ fn draw_live_preview(f: &mut Frame, area: Rect, selected: Option<FileItem>, app:
                 f.render_stateful_widget(stateful_image, inner_area, protocol);
                 return;
             }
-        }
 
         let body = if item.name == ".." {
             "↩ Go up to parent folder".to_string()

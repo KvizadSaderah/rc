@@ -352,6 +352,8 @@ impl InputField {
     }
 }
 
+// Only one PreviewState exists at a time, so boxing the big variant buys nothing.
+#[allow(clippy::large_enum_variant)]
 pub enum PreviewState {
     None,
     Loading {

@@ -1427,14 +1427,13 @@ fn handle_main_keys<B: ratatui::backend::Backend>(app: &mut App, key: KeyEvent, 
     if prev_state != new_state {
         app.preview_scroll_offset = 0;
         let selected_item = app.get_active_panel().get_selected_item().cloned();
-        if let Some(item) = selected_item {
-            if let Dialog::ViewFile { path, content, scroll_offset, .. } = &mut app.dialog {
+        if let Some(item) = selected_item
+            && let Dialog::ViewFile { path, content, scroll_offset, .. } = &mut app.dialog {
                 *path = item.path.clone();
                 *content = "\n  Loading preview...".to_string();
                 *scroll_offset = 0;
                 app.trigger_async_preview(item.path.clone(), 120, 40);
             }
-        }
     }
 }
 
