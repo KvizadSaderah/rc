@@ -1637,11 +1637,7 @@ fn draw_panel(f: &mut Frame, area: Rect, panel: &mut Panel, role: PaneRole, them
             item_style = get_extension_style(item, theme);
         }
 
-        let git_badge = if let Ok(canon) = item.path.canonicalize() {
-            panel.git_statuses.get(&canon)
-        } else {
-            panel.git_statuses.get(&item.path)
-        };
+        let git_badge = panel.git_statuses.get(&item.path);
 
         let git_str = match git_badge.map(|s| s.as_str()) {
             Some("M") => " [M]",

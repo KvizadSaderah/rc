@@ -1,5 +1,7 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::mpsc;
 
 use ratatui::widgets::ListState;
 
@@ -19,8 +21,44 @@ pub struct Panel {
     pub filter: Option<String>,
     pub marked: HashSet<PathBuf>, // Multi-selection Set (Tagged items)
     pub git_branch: Option<String>,
-    pub git_statuses: std::collections::HashMap<PathBuf, String>,
+    pub git_statuses: HashMap<PathBuf, String>,
     pub last_git_query: Option<std::time::Instant>,
+    git_rx: Option<mpsc::Receiver<GitInfo>>,
+}
+
+/// Branch name (or `detached@<sha>`) and per-path porcelain status codes.
+type GitInfo = (Option<String>, HashMap<PathBuf, String>);
+
+fn git(dir: &Path, args: &[&str]) -> Option<String> {
+    let out = Command::new("git").args(args).current_dir(dir).output().ok()?;
+    out.status
+        .success()
+        .then(|| String::from_utf8_lossy(&out.stdout).trim_end().to_string())
+}
+
+fn query_git(dir: &Path) -> GitInfo {
+    let mut statuses = HashMap::new();
+    if git(dir, &["rev-parse", "--is-inside-work-tree"]).as_deref() != Some("true") {
+        return (None, statuses);
+    }
+    let branch = match git(dir, &["branch", "--show-current"]) {
+        Some(b) if !b.is_empty() => Some(b),
+        _ => git(dir, &["rev-parse", "--short", "HEAD"]).map(|sha| format!("detached@{sha}")),
+    };
+    // --show-toplevel is already a real path, matching the canonical panel paths.
+    if let (Some(status), Some(root)) = (
+        git(dir, &["status", "--porcelain"]),
+        git(dir, &["rev-parse", "--show-toplevel"]),
+    ) {
+        let root = PathBuf::from(root);
+        for line in status.lines().filter(|l| l.len() > 3) {
+            let code = line[..2].trim().to_string();
+            let rel = &line[3..];
+            let rel = rel.find(" -> ").map_or(rel, |i| &rel[i + 4..]);
+            statuses.insert(root.join(rel.trim_matches('"')), code);
+        }
+    }
+    (branch, statuses)
 }
 
 fn fuzzy_match(text: &str, query: &str) -> bool {
@@ -55,8 +93,9 @@ impl Panel {
             filter: None,
             marked: HashSet::new(),
             git_branch: None,
-            git_statuses: std::collections::HashMap::new(),
+            git_statuses: HashMap::new(),
             last_git_query: None,
+            git_rx: None,
         };
         panel.refresh();
         panel
@@ -124,74 +163,37 @@ impl Panel {
             self.scroll_state.select(Some(self.selected));
         }
 
-        // Query Git status if we are in a Git workspace and enough time has elapsed
+        // Query Git status in the background: `git status` can take seconds in
+        // large repos and must not block the UI thread.
         let should_query_git = match self.last_git_query {
             None => true,
             Some(inst) => inst.elapsed() >= std::time::Duration::from_secs(10),
         };
-
-        if should_query_git {
-            self.git_branch = None;
-            self.git_statuses.clear();
+        if should_query_git && self.git_rx.is_none() {
             self.last_git_query = Some(std::time::Instant::now());
+            let (tx, rx) = mpsc::channel();
+            let dir = self.path.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(query_git(&dir));
+            });
+            self.git_rx = Some(rx);
+        }
+    }
 
-            if let Ok(out) = std::process::Command::new("git")
-                .arg("rev-parse")
-                .arg("--is-inside-work-tree")
-                .current_dir(&self.path)
-                .output()
-                && out.status.success() && String::from_utf8_lossy(&out.stdout).trim() == "true" {
-                    if let Ok(branch_out) = std::process::Command::new("git")
-                        .arg("branch")
-                        .arg("--show-current")
-                        .current_dir(&self.path)
-                        .output() {
-                        let b_name = String::from_utf8_lossy(&branch_out.stdout).trim().to_string();
-                        if !b_name.is_empty() {
-                            self.git_branch = Some(b_name);
-                        } else if let Ok(rev_out) = std::process::Command::new("git")
-                            .arg("rev-parse")
-                            .arg("--short")
-                            .arg("HEAD")
-                            .current_dir(&self.path)
-                            .output() {
-                            self.git_branch = Some(format!("detached@{}", String::from_utf8_lossy(&rev_out.stdout).trim()));
-                        }
-                    }
-
-                    if let Ok(status_out) = std::process::Command::new("git")
-                        .arg("status")
-                        .arg("--porcelain")
-                        .current_dir(&self.path)
-                        .output() {
-                        let status_str = String::from_utf8_lossy(&status_out.stdout);
-                        if let Ok(root_out) = std::process::Command::new("git")
-                            .arg("rev-parse")
-                            .arg("--show-toplevel")
-                            .current_dir(&self.path)
-                            .output() {
-                            let repo_root = PathBuf::from(String::from_utf8_lossy(&root_out.stdout).trim());
-                            for line in status_str.lines() {
-                                if line.len() > 3 {
-                                    let code = line[..2].trim().to_string();
-                                    let rel_path = &line[3..];
-                                    let actual_rel_path = if let Some(idx) = rel_path.find(" -> ") {
-                                        &rel_path[idx + 4..]
-                                    } else {
-                                        rel_path
-                                    };
-                                    let cleaned_rel = actual_rel_path.trim_matches('"');
-                                    let abs_path = repo_root.join(cleaned_rel);
-                                    if let Ok(canon_path) = abs_path.canonicalize() {
-                                        self.git_statuses.insert(canon_path, code);
-                                    } else {
-                                        self.git_statuses.insert(abs_path, code);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+    /// Apply a finished background git query. Returns true if one arrived.
+    pub fn poll_git(&mut self) -> bool {
+        let Some(rx) = &self.git_rx else { return false };
+        match rx.try_recv() {
+            Ok(info) => {
+                (self.git_branch, self.git_statuses) = info;
+                self.git_rx = None;
+                true
+            }
+            Err(mpsc::TryRecvError::Empty) => false,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.git_rx = None;
+                false
+            }
         }
     }
 
@@ -203,7 +205,11 @@ impl Panel {
                 self.filter = None;
                 self.marked.clear(); // Reset selections on dir transition
                 self.selected = 0;
+                // Drop any in-flight query for the old directory.
                 self.last_git_query = None;
+                self.git_rx = None;
+                self.git_branch = None;
+                self.git_statuses.clear();
                 self.refresh();
                 Ok(())
             }
@@ -362,6 +368,31 @@ mod tests {
         let before = p.path.clone();
         assert!(p.set_path(file).is_err());
         assert_eq!(p.path, before, "navigation into a file must not change path");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_git_query_runs_in_background() {
+        let (root, mut p) = fixture("git");
+        let inited = Command::new("git").arg("init").arg("-q").current_dir(&root).status();
+        if !inited.map(|s| s.success()).unwrap_or(false) {
+            let _ = fs::remove_dir_all(&root);
+            return; // git not installed
+        }
+        // The fixture's initial query predates `git init`; let it land first.
+        while p.git_rx.is_some() {
+            p.poll_git();
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        p.last_git_query = None;
+        p.refresh();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !p.poll_git() {
+            assert!(std::time::Instant::now() < deadline, "git query never finished");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(p.git_branch.is_some());
+        assert_eq!(p.git_statuses.get(&p.path.join("c.txt")).map(String::as_str), Some("??"));
         let _ = fs::remove_dir_all(&root);
     }
 

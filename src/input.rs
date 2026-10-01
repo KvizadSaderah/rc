@@ -58,6 +58,10 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
         // Drain progress from any running background filesystem job
         app.drain_fs_job();
 
+        for panel in app.panels.iter_mut().flatten() {
+            panel.poll_git();
+        }
+
         // Drain loaded previews
         if app.drain_previews() {
             dirty = true;
