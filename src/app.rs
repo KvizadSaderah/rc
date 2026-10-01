@@ -20,6 +20,7 @@ use ratatui::Terminal;
 
 use crate::config::*;
 use crate::fileops::{self, JobState, OpKind};
+use crate::shell;
 use crate::layout::{Dir, Node, PanelId};
 use crate::panel::*;
 use crate::types::*;
@@ -1306,13 +1307,13 @@ async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> PreviewCon
         
         // Expand %d (active panel directory)
         let dir_str = active_dir.to_string_lossy();
-        expanded = expanded.replace("%d", &format!("'{}'", dir_str));
+        expanded = expanded.replace("%d", &shell::quote(&dir_str));
         
         // Expand %f and %n
         if let Some(item) = selected_item {
             let f_str = item.path.to_string_lossy();
-            expanded = expanded.replace("%f", &format!("'{}'", f_str));
-            expanded = expanded.replace("%n", &format!("'{}'", item.name));
+            expanded = expanded.replace("%f", &shell::quote(&f_str));
+            expanded = expanded.replace("%n", &shell::quote(&item.name));
         } else {
             expanded = expanded.replace("%f", "");
             expanded = expanded.replace("%n", "");
@@ -1321,13 +1322,13 @@ async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> PreviewCon
         // Expand %m
         if !marked_files.is_empty() {
             let list = marked_files.iter()
-                .map(|p| format!("'{}'", p.to_string_lossy()))
+                .map(|p| shell::quote(&p.to_string_lossy()))
                 .collect::<Vec<_>>()
                 .join(" ");
             expanded = expanded.replace("%m", &list);
         } else if let Some(item) = selected_item {
             let f_str = item.path.to_string_lossy();
-            expanded = expanded.replace("%m", &format!("'{}'", f_str));
+            expanded = expanded.replace("%m", &shell::quote(&f_str));
         } else {
             expanded = expanded.replace("%m", "");
         }
@@ -1522,22 +1523,22 @@ async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> PreviewCon
         let rel_paths: Vec<String> = paths.iter()
             .map(|p| {
                 if let Ok(rel) = p.strip_prefix(&active_dir) {
-                    format!("'{}'", rel.to_string_lossy())
+                    shell::quote(&rel.to_string_lossy())
                 } else {
-                    format!("'{}'", p.to_string_lossy())
+                    shell::quote(&p.to_string_lossy())
                 }
             })
             .collect();
             
         let cmd = if archive_name.ends_with(".tar.gz") || archive_name.ends_with(".tgz") {
-            format!("tar -czf '{}' {}", archive_name, rel_paths.join(" "))
+            format!("tar -czf {} {}", shell::quote(&archive_name), rel_paths.join(" "))
         } else {
             let real_name = if archive_name.ends_with(".zip") {
                 archive_name
             } else {
                 format!("{}.zip", archive_name)
             };
-            format!("zip -r '{}' {}", real_name, rel_paths.join(" "))
+            format!("zip -r {} {}", shell::quote(&real_name), rel_paths.join(" "))
         };
         
         self.execute_shell_command(terminal, cmd);
@@ -1562,9 +1563,9 @@ async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> PreviewCon
         let dest_dir = self.get_inactive_panel().path.clone();
         
         let cmd = if ext == "zip" {
-            format!("unzip '{}' -d '{}'", selected.to_string_lossy(), dest_dir.to_string_lossy())
+            format!("unzip {} -d {}", shell::quote(&selected.to_string_lossy()), shell::quote(&dest_dir.to_string_lossy()))
         } else {
-            format!("tar -xf '{}' -C '{}'", selected.to_string_lossy(), dest_dir.to_string_lossy())
+            format!("tar -xf {} -C {}", shell::quote(&selected.to_string_lossy()), shell::quote(&dest_dir.to_string_lossy()))
         };
         
         self.status_message = format!("Extracting to {}...", dest_dir.display());

@@ -64,6 +64,12 @@ pub fn first_program(cmd: &str) -> String {
         .to_string()
 }
 
+/// Single-quote `s` for a POSIX shell, so file names with quotes, spaces or
+/// `$(...)` reach the command as one literal argument.
+pub fn quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Best-effort: does this command need a controlling terminal?
 pub fn needs_tty(cmd: &str) -> bool {
     TTY_PROGRAMS.contains(&first_program(cmd).as_str())
@@ -207,6 +213,18 @@ mod tests {
         assert!(!needs_tty("git status"));
         assert!(!needs_tty("echo hi"));
         assert!(!needs_tty("cargo build"));
+    }
+
+    #[test]
+    fn test_quote() {
+        assert_eq!(quote("a b"), "'a b'");
+        assert_eq!(quote("x'; rm -rf ~; '"), "'x'\\''; rm -rf ~; '\\'''");
+        let out = Command::new("sh")
+            .arg("-c")
+            .arg(format!("printf %s {}", quote("it's $(id)")))
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout), "it's $(id)");
     }
 
     #[test]
