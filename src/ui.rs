@@ -868,7 +868,7 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 1 => vec![
                     Line::from(""),
                     head("File Operations"),
-                    row("F2 / Ctrl+I",   "Show item properties dialog"),
+                    row("F2",            "Show item properties dialog"),
                     row("F5 / c",        "Copy selection to target pane ○"),
                     row("F6 / m",        "Move / Rename selection to target ○"),
                     row("F7 / n",        "Create new directory (mkdir)"),

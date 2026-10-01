@@ -1187,7 +1187,7 @@ fn handle_main_keys<B: ratatui::backend::Backend>(app: &mut App, key: KeyEvent, 
         app.initiate_extract(terminal);
     } else if matches_key(&key, &keys.delete) {
         app.initiate_delete();
-    } else if key.code == KeyCode::F(2) || (key.code == KeyCode::Char('i') && key.modifiers.contains(KeyModifiers::CONTROL)) {
+    } else if key.code == KeyCode::F(2) {
         app.initiate_properties();
     } else if matches_key(&key, &keys.menu) {
         app.dialog = Dialog::Menu {

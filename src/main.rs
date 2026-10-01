@@ -87,7 +87,7 @@ fn self_update() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Current version : v{current}");
     println!("  Latest release  : v{remote_tag}");
 
-    if current == remote_tag {
+    if version_tuple(remote_tag) <= version_tuple(current) {
         println!("\x1b[32m✓ Already up to date.\x1b[0m");
         return Ok(());
     }
@@ -127,13 +127,13 @@ fn self_update() -> Result<(), Box<dyn std::error::Error>> {
             let bin_src = tmp.join("rc");
             let bin_dst = PathBuf::from(&install_dir).join("rc");
             if bin_src.exists() {
-                fs::copy(&bin_src, &bin_dst)?;
+                // Stage next to the target, then rename: overwriting a signed
+                // binary in place can get it killed by macOS on next launch.
+                let staged = bin_dst.with_extension("new");
+                fs::copy(&bin_src, &staged)?;
                 #[cfg(unix)]
-                {
-                    let mut perms = fs::metadata(&bin_dst)?.permissions();
-                    perms.set_mode(0o755);
-                    fs::set_permissions(&bin_dst, perms)?;
-                }
+                fs::set_permissions(&staged, fs::Permissions::from_mode(0o755))?;
+                fs::rename(&staged, &bin_dst)?;
                 println!("\x1b[32m✓ Updated to v{remote_tag}  →  {}\x1b[0m", bin_dst.display());
             } else {
                 println!("\x1b[31m✗ Binary not found in release archive.\x1b[0m");
@@ -146,6 +146,8 @@ fn self_update() -> Result<(), Box<dyn std::error::Error>> {
                 .args([
                     "install", "--git",
                     &format!("https://github.com/{REPO}.git"),
+                    "--tag",
+                    &format!("v{remote_tag}"),
                     "--root",
                     &format!("{}/.local", env::var("HOME")?),
                 ])
@@ -161,6 +163,11 @@ fn self_update() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     Ok(())
+}
+
+/// `"1.10.2"` -> `[1, 10, 2]`, so versions compare numerically, not as strings.
+fn version_tuple(v: &str) -> Vec<u64> {
+    v.split('.').map(|p| p.parse().unwrap_or(0)).collect()
 }
 
 // =============================================================================
@@ -244,4 +251,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::version_tuple;
+
+    #[test]
+    fn test_version_ordering() {
+        assert!(version_tuple("1.10.0") > version_tuple("1.9.9"));
+        assert!(version_tuple("1.1.2") <= version_tuple("1.1.2"));
+        assert!(version_tuple("1.1.1") < version_tuple("1.1.2"));
+    }
 }

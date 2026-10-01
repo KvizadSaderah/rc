@@ -69,7 +69,7 @@ The navigation controls dynamically adapt depending on whether you are using **S
 ### Function Keys (Standard)
 
 - **F1**: Help manual / documentation popup
-- **F2 / Ctrl + I**: File/folder **Properties** (size, permissions, owner, timestamps)
+- **F2**: File/folder **Properties** (size, permissions, owner, timestamps)
 - **F3 / v**: Full screen file text/hex viewer
 - **F4 / e**: Edit file (suspends TUI, opens your default `$EDITOR` or `nano`)
 - **F5 / c**: Copy selected/tagged file(s) or directory to the other panel
