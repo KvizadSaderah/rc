@@ -174,8 +174,7 @@ fn version_tuple(v: &str) -> Vec<u64> {
 // Main Entrypoint
 // =============================================================================
 
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut write_last_dir = None;
     let mut starting_dir = None;
     let mut i = 1;

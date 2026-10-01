@@ -997,8 +997,8 @@ impl App {
                 
                 let tx = self.preview_tx.clone();
                 let path_clone = path;
-                tokio::spawn(async move {
-                    let content = Self::generate_async_preview(&path_clone, cols, rows).await;
+                std::thread::spawn(move || {
+                    let content = Self::generate_preview(&path_clone, cols, rows);
                     let _ = tx.send(PreviewResult {
                         path: path_clone,
                         width: cols,
@@ -1108,88 +1108,48 @@ fn format_markdown_preview(raw_text: &str) -> String {
     formatted
 }
 
-async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> PreviewContent {
+fn generate_preview(path: &Path, cols: u16, rows: u16) -> PreviewContent {
     if path.is_dir() {
-        let path_clone = path.to_path_buf();
-        let text = tokio::task::spawn_blocking(move || {
-            read_dir_preview(&path_clone)
-        }).await.unwrap_or_else(|_| "Error loading directory preview".to_string());
-        return PreviewContent::Text(text);
+        return PreviewContent::Text(read_dir_preview(path));
     }
 
     // Git Diff preview
-    let path_clone = path.to_path_buf();
-    if let Ok(Some(diff)) = tokio::task::spawn_blocking(move || {
-        Self::read_git_diff_preview(&path_clone)
-    }).await {
+    if let Some(diff) = Self::read_git_diff_preview(path) {
         return PreviewContent::Text(diff);
     }
 
     let ext = path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
 
     // Archive Preview
-    if ["zip", "tar", "gz", "tgz", "xz"].contains(&ext.as_str()) {
-        let path_clone = path.to_path_buf();
-        if let Ok(Some(archive_list)) = tokio::task::spawn_blocking(move || {
-            Self::read_archive_preview(&path_clone)
-        }).await {
+    if ["zip", "tar", "gz", "tgz", "xz"].contains(&ext.as_str())
+        && let Some(archive_list) = Self::read_archive_preview(path) {
             return PreviewContent::Text(archive_list);
         }
-    }
 
     // 1. Image previews via ratatui-image (native)
-    if ["png", "jpg", "jpeg", "gif", "webp", "bmp"].contains(&ext.as_str()) {
-        let path_clone = path.to_path_buf();
-        if let Ok(img) = tokio::task::spawn_blocking(move || {
-            if let Ok(raw_img) = image::open(&path_clone) {
-                // Downsample large images in background thread based on cols and rows to prevent UI lag/freeze during protocol rendering
-                let w = (cols as u32 * 12).max(100);
-                let h = (rows as u32 * 24).max(100);
-                Some(raw_img.thumbnail(w, h))
-            } else {
-                None
-            }
-        }).await
-            && let Some(dyn_img) = img {
-                return PreviewContent::Image(dyn_img);
-            }
-    }
+    if ["png", "jpg", "jpeg", "gif", "webp", "bmp"].contains(&ext.as_str())
+        && let Ok(raw_img) = image::open(path) {
+            // Downsample large images here, off the UI thread, so protocol rendering stays fast
+            let w = (cols as u32 * 12).max(100);
+            let h = (rows as u32 * 24).max(100);
+            return PreviewContent::Image(raw_img.thumbnail(w, h));
+        }
 
     // 2. Code previews via syntect (native)
     let is_text = ["rs", "py", "js", "ts", "json", "toml", "md", "sh", "txt", "cfg", "ini", "yaml", "yml", "xml", "html", "css", "c", "cpp", "h", "go", "java"].contains(&ext.as_str());
     if is_text {
-        let path_clone = path.to_path_buf();
-        if ext == "md" {
-            let text = tokio::task::spawn_blocking(move || {
-                if let Ok(content) = fs::read_to_string(&path_clone) {
-                    Some(Self::format_markdown_preview(&content))
-                } else {
-                    None
-                }
-            }).await.unwrap_or(None);
-            if let Some(content) = text {
-                return PreviewContent::Text(content);
+        if ext == "md"
+            && let Ok(content) = fs::read_to_string(path) {
+                return PreviewContent::Text(Self::format_markdown_preview(&content));
             }
-        }
-        let path_clone = path.to_path_buf();
         let max_lines = rows.saturating_mul(5).max(500);
-        if let Ok(highlighted) = tokio::task::spawn_blocking(move || {
-            highlight_file(&path_clone, cols, max_lines)
-        }).await
-            && let Some(content) = highlighted {
-                return PreviewContent::Text(content);
-            }
+        if let Some(content) = highlight_file(path, cols, max_lines) {
+            return PreviewContent::Text(content);
+        }
     }
 
-    // 3. Fallback to standard text / hex preview (blocking thread pool spawn)
-    let path_clone = path.to_path_buf();
-    let text = tokio::task::spawn_blocking(move || {
-        read_file_preview(&path_clone)
-    })
-    .await
-    .unwrap_or_else(|_| "Error generating preview".to_string());
-
-    PreviewContent::Text(text)
+    // 3. Fallback to standard text / hex preview
+    PreviewContent::Text(read_file_preview(path))
 }
 
     // =========================================================================
@@ -1198,8 +1158,8 @@ async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> PreviewCon
 
     pub fn trigger_async_preview(&self, path: PathBuf, cols: u16, rows: u16) {
         let tx = self.preview_tx.clone();
-        tokio::spawn(async move {
-            let content = Self::generate_async_preview(&path, cols, rows).await;
+        std::thread::spawn(move || {
+            let content = Self::generate_preview(&path, cols, rows);
             let _ = tx.send(PreviewResult {
                 path,
                 width: cols,
