@@ -20,6 +20,7 @@ use std::os::unix::fs::PermissionsExt;
 
 use ratatui::style::{Color, Style};
 
+use crate::fileops::OpKind;
 use crate::theme::Theme;
 
 // =============================================================================
@@ -412,6 +413,13 @@ pub enum Dialog {
     ConfirmMove {
         source_path: PathBuf,
         input: InputField,
+    },
+    /// Some copy/move targets already exist; ask before replacing them.
+    ConfirmOverwrite {
+        kind: OpKind,
+        items: Vec<(PathBuf, PathBuf)>,
+        conflicts: usize,
+        first_conflict: String,
     },
     ViewFile {
         path: PathBuf,

@@ -1607,8 +1607,47 @@ async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> PreviewCon
             vec![(source, dest_dir)]
         };
 
-        self.fs_job = Some(fileops::spawn(OpKind::Copy, items));
-        self.status_message = "Copying…".to_string();
+        self.start_transfer(OpKind::Copy, items);
+    }
+
+    /// Spawn a copy/move, first asking for confirmation if any target exists.
+    /// ponytail: only top-level targets are checked; an existing directory is
+    /// merged into, with files inside it replaced without a per-file prompt.
+    pub fn start_transfer(&mut self, kind: OpKind, items: Vec<(PathBuf, PathBuf)>) {
+        let conflicts: Vec<&PathBuf> = items
+            .iter()
+            .filter(|(src, dst)| src != dst && fs::symlink_metadata(dst).is_ok())
+            .map(|(_, dst)| dst)
+            .collect();
+        if let Some(first) = conflicts.first() {
+            self.dialog = Dialog::ConfirmOverwrite {
+                kind,
+                conflicts: conflicts.len(),
+                first_conflict: first.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                items,
+            };
+            return;
+        }
+        self.spawn_transfer(kind, items);
+    }
+
+    /// Resolve a `ConfirmOverwrite`: replace existing targets or skip them.
+    pub fn resolve_overwrite(&mut self, kind: OpKind, items: Vec<(PathBuf, PathBuf)>, overwrite: bool) {
+        let items: Vec<_> = if overwrite {
+            items
+        } else {
+            items.into_iter().filter(|(_, dst)| fs::symlink_metadata(dst).is_err()).collect()
+        };
+        if items.is_empty() {
+            self.status_message = "Nothing to do: all targets exist".to_string();
+            return;
+        }
+        self.spawn_transfer(kind, items);
+    }
+
+    fn spawn_transfer(&mut self, kind: OpKind, items: Vec<(PathBuf, PathBuf)>) {
+        self.status_message = format!("{}…", kind.verb());
+        self.fs_job = Some(fileops::spawn(kind, items));
     }
 
     pub fn initiate_move(&mut self) {
@@ -1655,8 +1694,7 @@ async fn generate_async_preview(path: &Path, cols: u16, rows: u16) -> PreviewCon
             vec![(source, target)]
         };
 
-        self.fs_job = Some(fileops::spawn(OpKind::Move, items));
-        self.status_message = "Moving…".to_string();
+        self.start_transfer(OpKind::Move, items);
     }
 
     pub fn initiate_mkdir(&mut self) {
@@ -2242,6 +2280,37 @@ mod tests {
             std::env::remove_var("TMUX");
             std::env::remove_var("RC_TEST_MULTIPLEXER_BIN");
         }
+    }
+
+    #[test]
+    fn test_copy_onto_existing_asks_then_skips() {
+        let (root, mut app) = app_in("overwrite");
+        let src = root.join("left/a.txt");
+        let dst = root.join("right/a.txt");
+        fs::write(&src, "new").unwrap();
+        fs::write(&dst, "old").unwrap();
+
+        app.execute_copy(src.clone(), dst.to_string_lossy().into_owned());
+        assert!(app.fs_job.is_none(), "must not start before confirmation");
+        let Dialog::ConfirmOverwrite { kind, items, conflicts, .. } = std::mem::replace(&mut app.dialog, Dialog::None) else {
+            panic!("Expected Dialog::ConfirmOverwrite");
+        };
+        assert_eq!(conflicts, 1);
+
+        app.resolve_overwrite(kind, items, false);
+        assert!(app.fs_job.is_none());
+        assert_eq!(fs::read_to_string(&dst).unwrap(), "old");
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn test_copy_to_free_target_starts_immediately() {
+        let (root, mut app) = app_in("nooverwrite");
+        let src = root.join("left/a.txt");
+        fs::write(&src, "x").unwrap();
+        app.execute_copy(src, root.join("right/a.txt").to_string_lossy().into_owned());
+        assert!(app.fs_job.is_some());
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

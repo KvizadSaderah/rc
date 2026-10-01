@@ -357,6 +357,21 @@ pub fn run_app(terminal: &mut Terminal<CrosstermBackend<io::Stdout>>, mut app: A
                         _ => {}
                     }
                 }
+                Dialog::ConfirmOverwrite { kind, items, .. } => {
+                    let (kind, overwrite) = (*kind, match key.code {
+                        KeyCode::Char('o') | KeyCode::Char('O') | KeyCode::Enter => Some(true),
+                        KeyCode::Char('s') | KeyCode::Char('S') => Some(false),
+                        _ => None,
+                    });
+                    if let Some(o) = overwrite {
+                        let items = std::mem::take(items);
+                        app.dialog = Dialog::None;
+                        app.resolve_overwrite(kind, items, o);
+                    } else if matches!(key.code, KeyCode::Esc | KeyCode::Char('c') | KeyCode::Char('C')) {
+                        app.dialog = Dialog::None;
+                        app.status_message = "Cancelled".to_string();
+                    }
+                }
                 Dialog::CommandLine { input } => match key.code {
                     KeyCode::Enter => {
                         let cmd = input.text.clone();

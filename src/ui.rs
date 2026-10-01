@@ -487,6 +487,33 @@ pub fn ui(f: &mut Frame, app: &mut App) {
                 sub_chunks[1].y + 1,
             ));
         }
+        Dialog::ConfirmOverwrite { kind, conflicts, first_conflict, .. } => {
+            let area = centered_rect_min(56, 20, 44, 7, f.area());
+            f.render_widget(Clear, area);
+            let block = Block::default()
+                .title(" Target Exists ")
+                .title_alignment(Alignment::Center)
+                .borders(Borders::ALL)
+                .border_type(border_type)
+                .border_style(Style::default().fg(Color::Rgb(234, 179, 8)))
+                .bg(theme.status_bg);
+            let others = if *conflicts > 1 {
+                format!(" and {} more", conflicts - 1)
+            } else {
+                String::new()
+            };
+            let text = vec![
+                Line::from(""),
+                Line::from(vec![
+                    Span::raw(format!("{}: '", kind.verb())),
+                    Span::styled(first_conflict.as_str(), Style::default().fg(Color::Yellow).bold()),
+                    Span::raw(format!("'{} already exist(s)", others)),
+                ]).alignment(Alignment::Center),
+                Line::from(""),
+                Line::from("[O]/[Enter] overwrite   ·   [S] skip existing   ·   [Esc] cancel").alignment(Alignment::Center),
+            ];
+            f.render_widget(Paragraph::new(text).block(block).wrap(Wrap { trim: true }), area);
+        }
         Dialog::ConfirmCopy { source_path, input } => {
             let area = centered_rect_min(65, 20, 40, 6, f.area());
             f.render_widget(Clear, area);
